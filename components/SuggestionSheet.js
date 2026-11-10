@@ -87,6 +87,26 @@ export default function SuggestionSheet({ t, suggestion, hasFile, mode, busy, on
         </label>
       </div>
 
+      <div className="field-row two-col">
+        <label className="field">
+          <span>{t.category}</span>
+          <input value={draft.category || ''} dir={textDir(draft.category || '')} onChange={(e) => set({ category: e.target.value })} placeholder={t.categoryPh} maxLength={100} />
+        </label>
+        <label className="field">
+          <span>{t.repeat}</span>
+          <select
+            value={draft.repeat?.frequency || 'none'}
+            onChange={(e) => set({ repeat: e.target.value === 'none' ? null : { frequency: e.target.value, interval: 1 } })}
+          >
+            <option value="none">{t.noRepeat}</option>
+            <option value="daily">{t.daily}</option>
+            <option value="weekly">{t.weekly}</option>
+            <option value="monthly">{t.monthly}</option>
+            <option value="yearly">{t.yearly}</option>
+          </select>
+        </label>
+      </div>
+
       {draft.person && (
         <p className="meta-line">
           <span className="meta-label">{t.person}:</span> <span dir={textDir(draft.person)}>{draft.person}</span>

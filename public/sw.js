@@ -1,7 +1,7 @@
 // TaskAI service worker: makes the app installable and opens it offline.
 // It only caches the app's own files. Data calls to Supabase are never cached
 // here; the app keeps its own small saved copy of the task list.
-const CACHE = 'taskai-v1';
+const CACHE = 'taskai-v2';
 const SHELL = ['/', '/manifest.webmanifest', '/icons/icon-192.png'];
 
 self.addEventListener('install', (event) => {
@@ -51,4 +51,15 @@ self.addEventListener('fetch', (event) => {
       ),
     );
   }
+});
+
+// Tapping a task reminder opens (or focuses) the app.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      for (const c of list) if ('focus' in c) return c.focus();
+      return self.clients.openWindow('/');
+    }),
+  );
 });

@@ -82,8 +82,10 @@ Rules:
 - person: the sender, customer, supplier or other person involved, if identifiable; otherwise null.
 - summary: one or two short sentences: what the source is and what is being asked.
 - questions: up to 3 short questions when something important is unclear (who, when, which item); [] when clear.
+- category: a short label. Use a named project, client or company when one is mentioned (for example "Carmia"); otherwise one of Work, Personal, Family, Home, Finance, Health, Shopping. In the content's language.
+- repeat: null unless the content says it repeats. Otherwise {"frequency": "daily" | "weekly" | "monthly" | "yearly", "interval": 1, "weekday": 0-6 or null} where weekday is only for weekly on a specific day (0 = Sunday).
 - If nothing is actionable, give your best guess and ask in questions.
-Reply with ONLY a JSON object with exactly these keys: title, kind, steps, due_date, due_time, priority, person, summary, questions.`;
+Reply with ONLY a JSON object with exactly these keys: title, kind, steps, due_date, due_time, priority, person, summary, questions, category, repeat.`;
 
 type Capture = {
   text?: string;
@@ -190,7 +192,20 @@ function normalize(raw: string) {
     person: str(o.person, 120) || null,
     summary: str(o.summary, 600),
     questions: Array.isArray(o.questions) ? o.questions.map((q: unknown) => str(q, 200)).filter(Boolean).slice(0, 3) : [],
+    category: str(o.category, 60) || null,
+    repeat: normalizeRepeat(o.repeat),
   };
+}
+
+function normalizeRepeat(r: unknown) {
+  if (!r || typeof r !== 'object') return null;
+  const o = r as Record<string, unknown>;
+  if (!['daily', 'weekly', 'monthly', 'yearly'].includes(String(o.frequency))) return null;
+  const interval = Number(o.interval);
+  const rule: Record<string, unknown> = { frequency: o.frequency, interval: Number.isInteger(interval) && interval >= 1 && interval <= 365 ? interval : 1 };
+  const wd = Number(o.weekday);
+  if (o.frequency === 'weekly' && o.weekday != null && Number.isInteger(wd) && wd >= 0 && wd <= 6) rule.weekday = wd;
+  return rule;
 }
 
 function checkCapture(c: Capture) {

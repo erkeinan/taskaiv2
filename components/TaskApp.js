@@ -11,12 +11,15 @@ import TaskRow from './TaskRow';
 import Celebration from './Celebration';
 import Sheet from './Sheet';
 import SuggestionSheet from './SuggestionSheet';
-import TaskDetail from './TaskDetail';
+import TaskPage from './TaskPage';
+import { DEFAULT_PREFS, applyPrefs, mergePrefs, prefsToProfile } from '@/lib/prefs';
+import { normalizeRule, repeatLabel } from '@/lib/recurrence';
 import SettingsSheet from './SettingsSheet';
 
 // Only the columns the list shows. Never the whole row set, never in a loop.
 const COLS =
-  'id,workspace_id,title,kind,status,priority,due_at,due_has_time,snoozed_until,needs_answer,source_kind,completed_at,archived_at,deleted_at,created_at,updated_at';
+  'id,workspace_id,title,kind,status,priority,due_at,due_has_time,snoozed_until,needs_answer,source_kind,category,assignee_name,recurrence,occurrence_of,completed_at,archived_at,deleted_at,created_at,updated_at';
+const DEFAULT_CATEGORIES = ['Work', 'Personal', 'Family', 'Home', 'Finance', 'Health', 'Shopping'];
 
 function readLocal(key, fallback) {
   try {
@@ -66,6 +69,9 @@ export default function TaskApp() {
   const [suggestion, setSuggestion] = useState(null);
   const [detailId, setDetailId] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [prefs, setPrefs] = useState(DEFAULT_PREFS);
+  const [alerts, setAlerts] = useState('off'); // off | on | blocked
+  const [catFilter, setCatFilter] = useState('');
   const cameraRef = useRef(null);
   const fileRef = useRef(null);
   const inputRef = useRef(null);
@@ -82,6 +88,28 @@ export default function TaskApp() {
     document.documentElement.lang = lang;
     document.documentElement.dir = uiDir;
   }, [lang, uiDir]);
+
+  // ---- appearance preferences (theme, accent, font size) ----
+  useEffect(() => {
+    setPrefs({ ...DEFAULT_PREFS, ...readLocal('taskai.prefs', {}) });
+    const a = readLocal('taskai.alerts', 'off');
+    if (a === 'on' && typeof Notification !== 'undefined' && Notification.permission === 'granted') setAlerts('on');
+    else if (typeof Notification !== 'undefined' && Notification.permission === 'denied') setAlerts('blocked');
+  }, []);
+  useEffect(() => {
+    applyPrefs(prefs);
+    const mq = window.matchMedia?.('(prefers-color-scheme: dark)');
+    if (!mq || prefs.theme !== 'system') return undefined;
+    const onChange = () => applyPrefs(prefs);
+    mq.addEventListener?.('change', onChange);
+    return () => mq.removeEventListener?.('change', onChange);
+  }, [prefs]);
+
+  function updatePrefs(next) {
+    setPrefs(next);
+    writeLocal('taskai.prefs', next);
+    if (userId) getSupabase().from('profiles').update(prefsToProfile(next)).eq('id', userId).then(() => {});
+  }
 
   // ---- service worker, online state, clock for snoozes ----
   useEffect(() => {
@@ -142,14 +170,21 @@ export default function TaskApp() {
       });
     supabase
       .from('profiles')
-      .select('locale')
+      .select('locale,theme,accent,celebration,remind_minutes,time_zone,prefs')
       .eq('id', userId)
       .maybeSingle()
       .then(({ data }) => {
-        if (data?.locale && data.locale !== readLocal('taskai.lang', 'en')) {
+        if (!data) return;
+        if (data.locale && data.locale !== readLocal('taskai.lang', 'en')) {
           setLang(data.locale);
           writeLocal('taskai.lang', data.locale);
         }
+        const merged = mergePrefs(data);
+        setPrefs(merged);
+        writeLocal('taskai.prefs', merged);
+        // Repeating tasks are scheduled in the user's own time zone.
+        const tz = timeZone();
+        if (tz && tz !== data.time_zone) supabase.from('profiles').update({ time_zone: tz }).eq('id', userId).then(() => {});
       });
     callAI({ action: 'get-settings' })
       .then((res) => {
@@ -414,6 +449,8 @@ export default function TaskApp() {
       ...due,
       details: detailsText(draft),
       needs_answer: (draft.questions || []).length > 0,
+      category: (draft.category || '').trim().slice(0, 100) || null,
+      recurrence: normalizeRule(draft.repeat),
     };
 
     if (s.mode === 'organize') {
@@ -462,6 +499,54 @@ export default function TaskApp() {
     setSnoozing(null);
   };
 
+  // ---- task alerts on this device (while the app is open) ----
+  async function setAlertsOn(on) {
+    if (!on) {
+      setAlerts('off');
+      writeLocal('taskai.alerts', 'off');
+      return;
+    }
+    if (typeof Notification === 'undefined') {
+      setAlerts('blocked');
+      return;
+    }
+    const perm = await Notification.requestPermission();
+    const next = perm === 'granted' ? 'on' : perm === 'denied' ? 'blocked' : 'off';
+    setAlerts(next);
+    writeLocal('taskai.alerts', next);
+  }
+
+  useEffect(() => {
+    if (alerts !== 'on') return undefined;
+    const check = () => {
+      const sent = readLocal('taskai.alerted', {});
+      const nowMs = Date.now();
+      let changed = false;
+      for (const task of tasks) {
+        if (!task.due_at || task.status === 'done') continue;
+        if (task.snoozed_until && Date.parse(task.snoozed_until) > nowMs) continue;
+        const due = Date.parse(task.due_at);
+        const at = due - prefs.remindMinutes * 60000;
+        const key = `${task.id}:${task.due_at}`;
+        if (nowMs >= at && nowMs < due + 3600000 && !sent[key]) {
+          sent[key] = nowMs;
+          changed = true;
+          const body = `${task.title}\n${dueLabel(task.due_at, task.due_has_time, lang)}`;
+          navigator.serviceWorker?.ready
+            .then((reg) => reg.showNotification(t.reminderTitle, { body, tag: key, icon: '/icons/icon-192.png', data: { taskId: task.id } }))
+            .catch(() => {});
+        }
+      }
+      if (changed) {
+        for (const k of Object.keys(sent)) if (nowMs - sent[k] > 14 * 86400000) delete sent[k];
+        writeLocal('taskai.alerted', sent);
+      }
+    };
+    check();
+    const id = setInterval(check, 30000);
+    return () => clearInterval(id);
+  }, [alerts, tasks, prefs.remindMinutes, lang, t.reminderTitle]);
+
   function toggleLang() {
     const next = lang === 'en' ? 'he' : 'en';
     setLang(next);
@@ -484,9 +569,21 @@ export default function TaskApp() {
   const openTasks = tasks.filter((x) => x.status !== 'done');
   const doneTasks = tasks.filter((x) => x.status === 'done');
   const isSnoozed = (x) => x.snoozed_until && Date.parse(x.snoozed_until) > now;
-  const shown = (tab === 'open' ? [...openTasks.filter((x) => !isSnoozed(x)), ...openTasks.filter(isSnoozed)] : doneTasks).filter(
-    (x) => !query || x.title.toLowerCase().includes(query),
-  );
+  const sorters = {
+    due: (a, b) => (a.due_at ? Date.parse(a.due_at) : Infinity) - (b.due_at ? Date.parse(b.due_at) : Infinity) || Date.parse(b.created_at) - Date.parse(a.created_at),
+    newest: (a, b) => Date.parse(b.created_at) - Date.parse(a.created_at),
+    oldest: (a, b) => Date.parse(a.created_at) - Date.parse(b.created_at),
+    title: (a, b) => a.title.localeCompare(b.title, lang),
+  };
+  const sortFn = sorters[prefs.sort] || sorters.due;
+  const inFilter = (x) => (!catFilter || x.category === catFilter) && (!query || x.title.toLowerCase().includes(query));
+  const shown =
+    tab === 'open'
+      ? [...openTasks.filter((x) => !isSnoozed(x)).sort(sortFn), ...openTasks.filter(isSnoozed).sort(sortFn)].filter(inFilter)
+      : [...doneTasks].sort((a, b) => Date.parse(b.completed_at || b.created_at) - Date.parse(a.completed_at || a.created_at)).filter(inFilter);
+  const categories = [...new Set([...tasks.map((x) => x.category).filter(Boolean), ...DEFAULT_CATEGORIES])];
+  const usedCategories = [...new Set(tasks.map((x) => x.category).filter(Boolean))];
+  const people = [...new Set(tasks.map((x) => x.assignee_name).filter(Boolean))];
   const detailTask = detailId ? tasks.find((x) => x.id === detailId) : null;
   const hasInput = !!(text.trim() || attachment);
 
@@ -498,6 +595,10 @@ export default function TaskApp() {
       const late = !done && Date.parse(task.due_at) < now;
       chips.push({ key: 'due', label: dueLabel(task.due_at, task.due_has_time, lang), tone: late ? 'late' : '' });
     }
+    if (task.status === 'in_progress') chips.push({ key: 'prog', label: t.inProgress, tone: 'inbox' });
+    if (task.recurrence) chips.push({ key: 'rep', label: `🔁 ${repeatLabel(task.recurrence, lang)}` });
+    if (task.category) chips.push({ key: 'cat', label: `🏷 ${task.category}` });
+    if (task.assignee_name) chips.push({ key: 'who', label: `👤 ${task.assignee_name}` });
     if (task.kind === 'checklist') chips.push({ key: 'kind', label: `☑ ${t.checklist}` });
     if (task.kind === 'stages') chips.push({ key: 'kind', label: `⇢ ${t.stages}` });
     if (['screenshot', 'photo'].includes(task.source_kind)) chips.push({ key: 'src', label: '🖼' });
@@ -637,6 +738,19 @@ export default function TaskApp() {
         </button>
       </nav>
 
+      {usedCategories.length > 0 && (
+        <div className="cat-filter">
+          <button type="button" className={!catFilter ? 'on' : ''} onClick={() => setCatFilter('')}>
+            {t.all}
+          </button>
+          {usedCategories.map((c) => (
+            <button key={c} type="button" className={catFilter === c ? 'on' : ''} dir={textDir(c)} onClick={() => setCatFilter(catFilter === c ? '' : c)}>
+              {c}
+            </button>
+          ))}
+        </div>
+      )}
+
       <ul className="task-list">
         {shown.map((task) => {
           const done = task.status === 'done';
@@ -716,10 +830,14 @@ export default function TaskApp() {
       )}
 
       {detailTask && (
-        <TaskDetail
+        <TaskPage
           key={detailTask.id}
           t={t}
+          lang={lang}
           task={detailTask}
+          categories={categories}
+          people={people}
+          now={now}
           onClose={() => setDetailId(null)}
           patchTask={patchTask}
           onOrganize={organizeWithAI}
@@ -732,6 +850,12 @@ export default function TaskApp() {
       {settingsOpen && (
         <SettingsSheet
           t={t}
+          lang={lang}
+          prefs={prefs}
+          onPrefs={updatePrefs}
+          onTryCelebration={() => setCelebrate(true)}
+          alerts={alerts}
+          onAlerts={setAlertsOn}
           ai={ai}
           onAIChange={updateAi}
           onToggleLang={toggleLang}
@@ -740,7 +864,7 @@ export default function TaskApp() {
         />
       )}
 
-      {celebrate && <Celebration onEnd={endCelebrate} />}
+      {celebrate && <Celebration effect={prefs.celebration} direction={prefs.direction} onEnd={endCelebrate} />}
     </div>
   );
 }
