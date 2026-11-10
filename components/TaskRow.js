@@ -7,8 +7,8 @@ const OPEN_WIDTH = 168; // room for the revealed action buttons
 const THRESHOLD = 64;
 
 // One task row. Swipe in the reading direction (left to right in English,
-// right to left in Hebrew) to reveal the actions behind it.
-export default function TaskRow({ task, uiDir, done, actions, onToggle, snoozedLabel }) {
+// right to left in Hebrew) to reveal the actions behind it. Tap to open it.
+export default function TaskRow({ task, uiDir, done, actions, onToggle, onOpen, meta }) {
   const [drag, setDrag] = useState(0);
   const [revealed, setRevealed] = useState(false);
   const gesture = useRef(null);
@@ -16,7 +16,7 @@ export default function TaskRow({ task, uiDir, done, actions, onToggle, snoozedL
 
   function onPointerDown(e) {
     if (e.target.closest('button')) return;
-    gesture.current = { x: e.clientX, y: e.clientY, active: false, base: revealed ? OPEN_WIDTH : 0 };
+    gesture.current = { x: e.clientX, y: e.clientY, active: false, moved: false, base: revealed ? OPEN_WIDTH : 0 };
   }
 
   function onPointerMove(e) {
@@ -24,6 +24,7 @@ export default function TaskRow({ task, uiDir, done, actions, onToggle, snoozedL
     if (!g) return;
     const mx = (e.clientX - g.x) * sign;
     const my = e.clientY - g.y;
+    if (Math.abs(mx) > 6 || Math.abs(my) > 6) g.moved = true;
     if (!g.active) {
       if (Math.abs(mx) < 10 || Math.abs(mx) < Math.abs(my)) return;
       g.active = true;
@@ -38,6 +39,7 @@ export default function TaskRow({ task, uiDir, done, actions, onToggle, snoozedL
     if (!g) return;
     if (!g.active) {
       if (revealed) setRevealed(false);
+      else if (!g.moved) onOpen?.();
       return;
     }
     setRevealed(drag > THRESHOLD);
@@ -47,7 +49,7 @@ export default function TaskRow({ task, uiDir, done, actions, onToggle, snoozedL
   const offset = gesture.current?.active ? drag : revealed ? OPEN_WIDTH : 0;
 
   return (
-    <li className={`task-row${done ? ' is-done' : ''}${snoozedLabel ? ' is-snoozed' : ''}`}>
+    <li className={`task-row${done ? ' is-done' : ''}${meta?.snoozed ? ' is-snoozed' : ''}`}>
       <div className="task-actions">
         {actions.map((a) => (
           <button
@@ -69,14 +71,12 @@ export default function TaskRow({ task, uiDir, done, actions, onToggle, snoozedL
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
+        onPointerCancel={() => {
+          gesture.current = null;
+          setDrag(0);
+        }}
       >
-        <button
-          type="button"
-          className={`check${done ? ' checked' : ''}`}
-          aria-label={done ? 'Reopen' : 'Done'}
-          onClick={onToggle}
-        >
+        <button type="button" className={`check${done ? ' checked' : ''}`} aria-label={done ? 'Reopen' : 'Done'} onClick={onToggle}>
           {done && (
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M6 12.5l4 4 8-9" fill="none" stroke="currentColor" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" />
@@ -87,8 +87,17 @@ export default function TaskRow({ task, uiDir, done, actions, onToggle, snoozedL
           <span className="task-title" dir={textDir(task.title)}>
             {task.title}
           </span>
-          {snoozedLabel && <span className="task-meta">{snoozedLabel}</span>}
+          {meta && (meta.chips.length > 0 || meta.snoozed) && (
+            <span className="task-meta">
+              {meta.chips.map((c) => (
+                <span key={c.key} className={`chip ${c.tone || ''}`}>
+                  {c.label}
+                </span>
+              ))}
+            </span>
+          )}
         </div>
+        {task.priority > 0 && !done && <span className={`prio-dot p${task.priority}`} aria-hidden="true" />}
       </div>
     </li>
   );
