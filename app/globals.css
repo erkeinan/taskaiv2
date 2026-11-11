@@ -345,3 +345,6 @@ button.wa-date:hover { background: var(--line); }
 .sheet { position: relative; }
 .sheet-close { position: absolute; top: 10px; inset-inline-end: 10px; width: 36px; height: 36px; border: 0; border-radius: 50%; background: var(--panel); color: var(--muted); font-size: 22px; line-height: 1; z-index: 1; }
 .sheet > .sheet-title:first-of-type { padding-inline-end: 40px; }
+/* let the message area scroll inside the panel instead of growing past it */
+.convo, .convo-body { min-height: 0; }
+.detail-pane { overflow: hidden; }
