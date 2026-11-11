@@ -271,7 +271,13 @@ export default function TaskApp() {
       .not('archived_at', 'is', null)
       .order('archived_at', { ascending: false })
       .limit(100)
-      .then(({ data }) => setArchived(data || []));
+      .then(({ data }) =>
+        setArchived((prev) => {
+          // keep anything archived a moment ago that the server has not returned yet
+          const ids = new Set((data || []).map((x) => x.id));
+          return [...(prev || []).filter((x) => !ids.has(x.id) && x.archived_at), ...(data || [])];
+        }),
+      );
   }, [filter, workspaceId]);
 
   // ---- writes: change one row, ask for nothing back ----
@@ -447,12 +453,18 @@ export default function TaskApp() {
   const reopen = (task) => patchTask(task.id, { status: 'open', completed_at: null });
   function archive(id) {
     if (view?.type === 'task' && view.id === id) closeView();
-    patchTask(id, { archived_at: new Date().toISOString() });
+    const at = new Date().toISOString();
+    const row = tasksRef.current.find((x) => x.id === id);
+    if (row) setArchived((prev) => [{ ...row, archived_at: at }, ...(prev || []).filter((x) => x.id !== id)]);
+    patchTask(id, { archived_at: at });
   }
   function restore(id) {
-    patchTask(id, { archived_at: null });
+    // restoring reopens the task, as in the old app
+    const patch = { archived_at: null, status: 'open', completed_at: null };
     const row = archived?.find((x) => x.id === id);
-    if (row) setTasks((prev) => [{ ...row, archived_at: null }, ...prev.filter((x) => x.id !== id)]);
+    setArchived((prev) => (prev ? prev.filter((x) => x.id !== id) : prev));
+    if (row) setTasks((prev) => [{ ...row, ...patch }, ...prev.filter((x) => x.id !== id)]);
+    patchTask(id, patch);
   }
   async function reallyDelete(id) {
     setConfirmDel(null);
@@ -774,7 +786,11 @@ export default function TaskApp() {
             <TaskRow key={task.id} {...rowProps(task)} />
           ))}
         </ul>
-        {shown.length === 0 && <p className="empty">{query ? `${t.noMatch} ${ai?.hasKey ? t.noMatchAdd : ''}` : filter === 'done' ? t.emptyDone : t.empty}</p>}
+        {shown.length === 0 && (
+          <p className="empty">
+            {query ? `${t.noMatch} ${ai?.hasKey ? t.noMatchAdd : ''}` : filter === 'done' ? t.emptyDone : filter === 'archived' ? t.emptyArchived : filter === 'all' ? t.empty : t.emptyFilter}
+          </p>
+        )}
         {filter === 'all' && open.length > 0 && open.length < 4 && <p className="hint">{t.swipeHint}</p>}
 
         <button type="button" className="fab" aria-label={t.assistant} onClick={() => openView({ type: 'assistant' })}>

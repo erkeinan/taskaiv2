@@ -342,3 +342,6 @@ button.wa-date:hover { background: var(--line); }
   .sheet, .wa-front { animation: none; transition: none; }
 }
 .quick-replies.in-body { background: transparent; padding: 2px 0 4px; max-width: min(92%, 600px); }
+.sheet { position: relative; }
+.sheet-close { position: absolute; top: 10px; inset-inline-end: 10px; width: 36px; height: 36px; border: 0; border-radius: 50%; background: var(--panel); color: var(--muted); font-size: 22px; line-height: 1; z-index: 1; }
+.sheet > .sheet-title:first-of-type { padding-inline-end: 40px; }
