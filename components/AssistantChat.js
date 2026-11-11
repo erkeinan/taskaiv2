@@ -48,6 +48,7 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
   const [time, setTime] = useState('');
   const [keepOffer, setKeepOffer] = useState(null); // { att, tasks: [{id,title}] }
   const [menuOpen, setMenuOpen] = useState(false);
+  const flowAtt = useRef(null); // the file being discussed, until a task is saved from it
   const scrollRef = useRef(null);
   const fileRef = useRef(null);
   const cameraRef = useRef(null);
@@ -112,7 +113,7 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
     const userMsg = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: shown || a?.name || '',
+      content: shown,
       meta: { ...(answer && answer !== shown ? { answer } : {}), ...(a ? { attachment: { name: a.name, kind: a.kind } } : {}) },
       created_at: new Date().toISOString(),
       previewUrl: a?.previewUrl,
@@ -137,8 +138,12 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
       userMsg.meta = userMeta;
       await supabase.from('chat_messages').insert({ id: userMsg.id, role: 'user', content: userMsg.content.slice(0, 24000), meta: userMeta });
       await supabase.from('chat_messages').insert({ id: botMsg.id, role: 'assistant', content: botMsg.content.slice(0, 24000), meta: botMsg.meta });
+      if (a) flowAtt.current = a;
       const created = saved.filter((s) => s.kind === 'created');
-      if (a && created.length) setKeepOffer({ att: a, tasks: created });
+      if (flowAtt.current && created.length) {
+        setKeepOffer({ att: flowAtt.current, tasks: created });
+        flowAtt.current = null;
+      }
     } catch (e) {
       setError(e.message || t.error);
     } finally {
