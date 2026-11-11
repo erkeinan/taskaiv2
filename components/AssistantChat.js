@@ -5,6 +5,7 @@ import { getSupabase } from '@/lib/supabase';
 import { textDir } from '@/lib/i18n';
 import { callAI, localNow, timeZone } from '@/lib/ai';
 import { prepareFile } from '@/lib/media';
+import { dueLabel, partsToDue } from '@/lib/dates';
 
 const CHAT_CACHE = 'taskai.chat';
 
@@ -62,8 +63,12 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
       .then(({ data }) => {
         if (!data) return;
         const list = data.reverse();
-        setMessages(list);
-        writeCache(list);
+        setMessages((prev) => {
+          const ids = new Set(list.map((m) => m.id));
+          const merged = [...list, ...prev.filter((m) => !ids.has(m.id) && (m.previewUrl || m.meta?.pending))];
+          writeCache(merged);
+          return merged;
+        });
       });
   }, []);
 
@@ -112,6 +117,7 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
       created_at: new Date().toISOString(),
       previewUrl: a?.previewUrl,
     };
+    userMsg.meta.pending = true;
     push(userMsg);
     setBusy(true);
     try {
@@ -127,7 +133,9 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
       };
       push(botMsg);
       const supabase = getSupabase();
-      await supabase.from('chat_messages').insert({ id: userMsg.id, role: 'user', content: userMsg.content.slice(0, 24000), meta: userMsg.meta });
+      const { pending: _p, ...userMeta } = userMsg.meta;
+      userMsg.meta = userMeta;
+      await supabase.from('chat_messages').insert({ id: userMsg.id, role: 'user', content: userMsg.content.slice(0, 24000), meta: userMeta });
       await supabase.from('chat_messages').insert({ id: botMsg.id, role: 'assistant', content: botMsg.content.slice(0, 24000), meta: botMsg.meta });
       const created = saved.filter((s) => s.kind === 'created');
       if (a && created.length) setKeepOffer({ att: a, tasks: created });
@@ -228,7 +236,7 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
                 {m.content}
               </span>
             )}
-            {m.role === 'assistant' && m.meta?.question?.title && m.meta.question.title !== m.content && (
+            {m.role === 'assistant' && m.meta?.question?.title && !/[?？]\s*$/.test(m.content) && (
               <span className="bubble-q" dir={textDir(m.meta.question.title)}>
                 {m.meta.question.title}
               </span>
@@ -245,6 +253,30 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
             <span className="bubble-time">{fmtTime.format(new Date(m.created_at))}</span>
           </div>
         ))}
+      {question && (question.options?.length > 0 || question.allow_date) && (
+          <div className="quick-replies in-body">
+            {question.options?.map((o, i) => (
+              <button key={i} type="button" className="option" dir={textDir(o.label)} onClick={() => send(o.label, { answer: o.value })}>
+                {o.label}
+              </button>
+            ))}
+            {question.allow_date && (
+              <form
+                className="date-answer"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (date) send(`📅 ${dueLabel(partsToDue(date, time).due_at, !!time, lang)}`, { answer: `Date: ${date}${time ? ` ${time}` : ''}` });
+                }}
+              >
+                <input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label={t.due} />
+                <input type="time" value={time} onChange={(e) => setTime(e.target.value)} aria-label={t.time} />
+                <button type="submit" className="option strong" disabled={!date}>
+                  {t.setDate}
+                </button>
+              </form>
+            )}
+          </div>
+        )}
         {busy && (
           <div className="bubble in typing" aria-label={t.aiReading}>
             <span />
@@ -266,31 +298,6 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
           </div>
         )}
       </div>
-
-      {question && (question.options?.length > 0 || question.allow_date) && (
-        <div className="quick-replies">
-          {question.options?.map((o, i) => (
-            <button key={i} type="button" className="option" dir={textDir(o.label)} onClick={() => send(o.label, { answer: o.value })}>
-              {o.label}
-            </button>
-          ))}
-          {question.allow_date && (
-            <form
-              className="date-answer"
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (date) send(`${t.due}: ${date}${time ? ` ${time}` : ''}`, { answer: `Date: ${date}${time ? ` ${time}` : ''}` });
-              }}
-            >
-              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label={t.due} />
-              <input type="time" value={time} onChange={(e) => setTime(e.target.value)} aria-label={t.time} />
-              <button type="submit" className="option strong" disabled={!date}>
-                {t.setDate}
-              </button>
-            </form>
-          )}
-        </div>
-      )}
 
       {error && (
         <button type="button" className="banner error" onClick={() => setError('')}>

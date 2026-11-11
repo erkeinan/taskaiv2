@@ -137,7 +137,14 @@ async function complete(provider: Provider, model: string, key: string, system: 
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, response_format: { type: 'json_object' }, max_completion_tokens: maxTokens * 4 }),
+      body: JSON.stringify({
+        model,
+        messages,
+        response_format: { type: 'json_object' },
+        max_completion_tokens: maxTokens * 4,
+        // reasoning models answer much faster with low effort; this task does not need deep reasoning
+        ...(/^(gpt-5|o\d)/.test(model) ? { reasoning_effort: 'low' } : {}),
+      }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new ProviderError('OpenAI', res.status, body?.error?.message);

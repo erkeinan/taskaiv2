@@ -227,9 +227,14 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
   const doneCount = steps.filter((s) => s.done).length;
   const freq = rule?.frequency || 'none';
 
+  const seenUpdates = useRef(-1);
   useEffect(() => {
-    const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    // first load: stay at the top; a newly added update: scroll to it
+    if (seenUpdates.current >= 0 && updates.length > seenUpdates.current) {
+      const el = bodyRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+    seenUpdates.current = updates.length;
   }, [updates.length]);
 
   const subtitle = [task.category, task.due_at ? dueLabel(task.due_at, task.due_has_time, lang) : null, rule ? `🔁 ${repeatLabel(rule, lang)}` : null]

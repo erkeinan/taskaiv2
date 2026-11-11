@@ -341,3 +341,4 @@ button.wa-date:hover { background: var(--line); }
   .celebration { display: none; }
   .sheet, .wa-front { animation: none; transition: none; }
 }
+.quick-replies.in-body { background: transparent; padding: 2px 0 4px; max-width: min(92%, 600px); }

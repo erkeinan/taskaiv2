@@ -569,11 +569,9 @@ export default function TaskApp() {
     const subParts = [];
     if (task.status === 'in_progress') subParts.push(t.inProgress);
     if (task.steps_total > 0) subParts.push(`☑ ${task.steps_done}/${task.steps_total}`);
+    if (task.category) subParts.push(task.category);
+    if (task.assignee_name) subParts.push(`👤 ${task.assignee_name}`);
     if (task.preview) subParts.push(task.preview);
-    else {
-      if (task.category) subParts.push(task.category);
-      if (task.assignee_name) subParts.push(`👤 ${task.assignee_name}`);
-    }
     const badges = (
       <>
         {task.recurrence && <span title={repeatLabel(task.recurrence, lang)}>🔁</span>}
