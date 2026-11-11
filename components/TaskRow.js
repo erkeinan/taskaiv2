@@ -3,22 +3,30 @@
 import { useRef, useState } from 'react';
 import { textDir } from '@/lib/i18n';
 
-const OPEN_WIDTH = 168; // room for the revealed action buttons
+const OPEN_WIDTH = 168;
 const THRESHOLD = 64;
+const AVATAR_COLORS = ['#25a18e', '#6d3a83', '#2f6f9f', '#c2410c', '#b0405e', '#4f7d63', '#a8640a', '#5b6b85'];
 
-// One task row. Swipe in the reading direction (left to right in English,
-// right to left in Hebrew) to reveal the actions behind it. Tap to open it.
-export default function TaskRow({ task, uiDir, done, actions, onToggle, onOpen, meta }) {
+function avatarFor(task) {
+  const label = task.category || task.title || '?';
+  let h = 0;
+  for (const ch of label) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return { letter: [...label.trim()][0]?.toUpperCase() || '?', color: AVATAR_COLORS[h % AVATAR_COLORS.length] };
+}
+
+// A WhatsApp-style row: avatar, title, one-line preview, date on the right.
+// Swipe in the reading direction for Done / Snooze. Tap the date to change it.
+export default function TaskRow({ task, uiDir, done, selected, actions, onOpen, onDate, dateLabel, dateTone, subtitle, badges }) {
   const [drag, setDrag] = useState(0);
   const [revealed, setRevealed] = useState(false);
   const gesture = useRef(null);
   const sign = uiDir === 'rtl' ? -1 : 1;
+  const av = avatarFor(task);
 
   function onPointerDown(e) {
     if (e.target.closest('button')) return;
     gesture.current = { x: e.clientX, y: e.clientY, active: false, moved: false, base: revealed ? OPEN_WIDTH : 0 };
   }
-
   function onPointerMove(e) {
     const g = gesture.current;
     if (!g) return;
@@ -32,14 +40,13 @@ export default function TaskRow({ task, uiDir, done, actions, onToggle, onOpen, 
     }
     setDrag(Math.max(0, Math.min(OPEN_WIDTH + 24, g.base + mx)));
   }
-
   function onPointerUp() {
     const g = gesture.current;
     gesture.current = null;
     if (!g) return;
     if (!g.active) {
       if (revealed) setRevealed(false);
-      else if (!g.moved) onOpen?.();
+      else if (!g.moved) onOpen();
       return;
     }
     setRevealed(drag > THRESHOLD);
@@ -49,7 +56,7 @@ export default function TaskRow({ task, uiDir, done, actions, onToggle, onOpen, 
   const offset = gesture.current?.active ? drag : revealed ? OPEN_WIDTH : 0;
 
   return (
-    <li className={`task-row${done ? ' is-done' : ''}${meta?.snoozed ? ' is-snoozed' : ''}`}>
+    <li className={`wa-row${done ? ' is-done' : ''}${selected ? ' selected' : ''}`}>
       <div className="task-actions">
         {actions.map((a) => (
           <button
@@ -66,7 +73,7 @@ export default function TaskRow({ task, uiDir, done, actions, onToggle, onOpen, 
         ))}
       </div>
       <div
-        className="task-front"
+        className="wa-front"
         style={{ transform: `translateX(${sign * offset}px)`, transition: gesture.current?.active ? 'none' : undefined }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -76,28 +83,25 @@ export default function TaskRow({ task, uiDir, done, actions, onToggle, onOpen, 
           setDrag(0);
         }}
       >
-        <button type="button" className={`check${done ? ' checked' : ''}`} aria-label={done ? 'Reopen' : 'Done'} onClick={onToggle}>
-          {done && (
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M6 12.5l4 4 8-9" fill="none" stroke="currentColor" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          )}
-        </button>
-        <div className="task-text">
-          <span className="task-title" dir={textDir(task.title)}>
-            {task.title}
-          </span>
-          {meta && (meta.chips.length > 0 || meta.snoozed) && (
-            <span className="task-meta">
-              {meta.chips.map((c) => (
-                <span key={c.key} className={`chip ${c.tone || ''}`}>
-                  {c.label}
-                </span>
-              ))}
+        <span className="avatar" style={{ background: done ? 'var(--muted)' : av.color }} aria-hidden="true">
+          {done ? '✓' : av.letter}
+        </span>
+        <div className="wa-main">
+          <div className="wa-line">
+            <span className="wa-title" dir={textDir(task.title)}>
+              {task.title}
             </span>
-          )}
+            <button type="button" className={`wa-date ${dateTone || ''}`} onClick={onDate}>
+              {dateLabel || '📅'}
+            </button>
+          </div>
+          <div className="wa-line">
+            <span className="wa-sub" dir={textDir(subtitle)}>
+              {subtitle}
+            </span>
+            <span className="wa-badges">{badges}</span>
+          </div>
         </div>
-        {task.priority > 0 && !done && <span className={`prio-dot p${task.priority}`} aria-hidden="true" />}
       </div>
     </li>
   );
