@@ -69,6 +69,7 @@ export default function TaskApp() {
   const [lastChat, setLastChat] = useState(null);
   const [wide, setWide] = useState(false);
   const cameraRef = useRef(null);
+  const chipsRef = useRef(null);
   const fileRef = useRef(null);
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
@@ -429,6 +430,7 @@ export default function TaskApp() {
   function addAsTask() {
     const v = text.trim();
     if (!v) return;
+    setFilter('all');
     if (ai?.hasKey) askAssistant(v, null, { mode: 'task' });
     else saveToInbox();
   }
@@ -629,6 +631,11 @@ export default function TaskApp() {
     await getSupabase().auth.signOut();
     setTasks([]);
   }
+
+  // keep the chosen filter chip in view (for example Notes after saving a note)
+  useEffect(() => {
+    chipsRef.current?.querySelector('button.on')?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+  }, [filter]);
 
   // ---- what the list shows ----
   const nowDate = new Date(now);
@@ -877,9 +884,15 @@ export default function TaskApp() {
           </button>
         )}
 
-        <nav className="chips" aria-label={t.menu}>
+        <nav className="chips" aria-label={t.menu} ref={chipsRef}>
           {chips.map(([key, label]) => (
-            <button key={key} type="button" className={filter === key ? 'on' : ''} dir={textDir(label)} onClick={() => setFilter(key)}>
+            <button
+              key={key}
+              type="button"
+              className={filter === key ? 'on' : ''}
+              dir={textDir(label)}
+              onClick={() => setFilter(key)}
+            >
               {label}
             </button>
           ))}
@@ -910,7 +923,7 @@ export default function TaskApp() {
             <TaskRow key={task.id} {...rowProps(task)} />
           ))}
         </ul>
-        {shown.length === 0 && (
+        {shown.length === 0 && !query && (
           <p className="empty">
             {query ? t.noMatch : filter === 'done' ? t.emptyDone : filter === 'archived' ? t.emptyArchived : filter === 'notes' ? t.emptyNotes : filter === 'all' ? t.empty : t.emptyFilter}
           </p>
