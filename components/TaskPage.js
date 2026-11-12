@@ -1,27 +1,19 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { getSupabase } from '@/lib/supabase';
 import { textDir } from '@/lib/i18n';
-import { dueLabel, dueToParts, partsToDue } from '@/lib/dates';
+import { dueLabel } from '@/lib/dates';
 import { normalizeRule, repeatLabel, weekdayName } from '@/lib/recurrence';
-
-const pad = (n) => String(n).padStart(2, '0');
-const toLocalInput = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-
-function snoozeAt(kind) {
-  const d = new Date();
-  if (kind === 'hour') d.setHours(d.getHours() + 1);
-  else {
-    d.setDate(d.getDate() + (kind === 'week' ? 7 : 1));
-    d.setHours(9, 0, 0, 0);
-  }
-  return d.toISOString();
-}
+import Sheet from './Sheet';
+import DateSheet from './DateSheet';
+import RemindSheet from './RemindSheet';
 
 // Full-screen task page: everything about one task. The phone's back button closes it.
 export default function TaskPage({ t, lang, task, categories, people, now, onClose, patchTask, onOrganize, onDone, onArchive, onDelete, onRestore }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [edit, setEdit] = useState(null);
+  const isNote = task.kind === 'note';
   const bodyRef = useRef(null);
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState('');
@@ -35,9 +27,9 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
   const [assignee, setAssignee] = useState(task.assignee_name || '');
   const loadedDescription = useRef('');
 
-  const parts = dueToParts(task.due_at, task.due_has_time);
   const rule = normalizeRule(task.recurrence);
-  const snoozed = task.snoozed_until && Date.parse(task.snoozed_until) > now;
+  const remindOn = task.snoozed_until && Date.parse(task.snoozed_until) > now;
+  const late = task.status !== 'done' && task.due_at && Date.parse(task.due_at) < now;
   const fmt = new Intl.DateTimeFormat(lang === 'he' ? 'he-IL' : 'en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
   // One small read per section, only when the page opens.
@@ -142,25 +134,25 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
     logEvent(r ? `repeat:${JSON.stringify(r)}` : 'repeat:off');
   }
 
-  function snooze(iso) {
+  function remind(iso) {
     patchTask(task.id, { snoozed_until: iso });
     logEvent(`snooze:${iso}`);
   }
 
-  function unsnooze() {
+  function unremind() {
     patchTask(task.id, { snoozed_until: null });
     logEvent('unsnooze');
   }
 
-  function saveCategory() {
-    const v = category.trim().slice(0, 100);
+  function saveCategory(value) {
+    const v = value.trim().slice(0, 100);
     if (v === (task.category || '')) return;
     patchTask(task.id, { category: v || null });
     if (v) logEvent(`category:${v}`);
   }
 
-  function saveAssignee() {
-    const v = assignee.trim().slice(0, 100);
+  function saveAssignee(value) {
+    const v = value.trim().slice(0, 100);
     if (v === (task.assignee_name || '')) return;
     patchTask(task.id, { assignee_name: v || null });
     if (v) logEvent(`assign:${v}`);
@@ -237,7 +229,7 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
     seenUpdates.current = updates.length;
   }, [updates.length]);
 
-  const subtitle = [task.category, task.due_at ? dueLabel(task.due_at, task.due_has_time, lang) : null, rule ? `🔁 ${repeatLabel(rule, lang)}` : null]
+  const subtitle = [isNote ? `📝 ${t.note}` : null, task.category, task.due_at ? dueLabel(task.due_at, task.due_has_time, lang) : null, rule ? `🔁 ${repeatLabel(rule, lang)}` : null]
     .filter(Boolean)
     .join(' · ');
 
@@ -277,6 +269,9 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
                   {t.archive}
                 </button>
               )}
+              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); saveTexts(); patchTask(task.id, isNote ? { kind: 'single', status: 'open' } : { kind: 'note' }); }}>
+                {isNote ? t.makeTask : t.makeNote}
+              </button>
               <button type="button" role="menuitem" className="danger" onClick={() => { setMenuOpen(false); onDelete(task.id); }}>
                 {t.delete}
               </button>
@@ -287,171 +282,88 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
 
       <div className="convo-body wallpaper" ref={bodyRef}>
         <section className="info-card">
-          <div className="detail-head">
-            {task.status === 'inbox' && <span className="pill">{t.inbox}</span>}
-            {task.archived_at && <span className="pill">{t.fArchived}</span>}
-            {task.needs_answer && <span className="pill warn">{t.needsAnswer}</span>}
-            {snoozed && <span className="pill warn">💤 {fmt.format(new Date(task.snoozed_until))}</span>}
+          {(task.status === 'inbox' || task.archived_at || task.needs_answer) && (
+            <div className="detail-head">
+              {task.status === 'inbox' && <span className="pill">{t.inbox}</span>}
+              {task.archived_at && <span className="pill">{t.fArchived}</span>}
+              {task.needs_answer && <span className="pill warn">{t.needsAnswer}</span>}
+            </div>
+          )}
+
+          <AutoText className="detail-title" value={title} onChange={setTitle} onBlur={saveTexts} maxLength={500} label={t.title} />
+
+          <div className="prop-chips">
+            {!isNote && (
+              <button type="button" className={`prop status-${task.status}`} onClick={() => setEdit('status')}>
+                <span aria-hidden="true">{task.status === 'done' ? '✓' : task.status === 'in_progress' ? '◐' : '○'}</span>
+                {task.status === 'done' ? t.done : task.status === 'in_progress' ? t.inProgress : t.open}
+              </button>
+            )}
+            {!isNote && (
+              <button type="button" className={`prop${task.due_at ? ' set' : ''}${late ? ' late' : ''}`} onClick={() => setEdit('date')}>
+                <span aria-hidden="true">📅</span>
+                {task.due_at ? dueLabel(task.due_at, task.due_has_time, lang) : t.dates}
+              </button>
+            )}
+            <button type="button" className={`prop${remindOn ? ' set' : ''}`} onClick={() => setEdit('remind')}>
+              <span aria-hidden="true">⏰</span>
+              {remindOn ? fmt.format(new Date(task.snoozed_until)) : t.remind}
+            </button>
+            {!isNote && (
+              <button type="button" className={`prop${rule ? ' set' : ''}`} onClick={() => setEdit('repeat')}>
+                <span aria-hidden="true">🔁</span>
+                {rule ? repeatLabel(rule, lang) : t.repeat}
+              </button>
+            )}
+            <button type="button" className={`prop${task.category ? ' set' : ''}`} onClick={() => setEdit('category')}>
+              <span aria-hidden="true">🏷</span>
+              <span dir={textDir(task.category || '')}>{task.category || t.category}</span>
+            </button>
+            {!isNote && (
+              <button type="button" className={`prop${task.assignee_name ? ' set' : ''}`} onClick={() => setEdit('assignee')}>
+                <span aria-hidden="true">👤</span>
+                <span dir={textDir(task.assignee_name || '')}>{task.assignee_name || t.assignee}</span>
+              </button>
+            )}
+            {!isNote && (
+              <button type="button" className={`prop${task.priority ? ` set prio${task.priority}` : ''}`} onClick={() => setEdit('priority')}>
+                <span aria-hidden="true" className="flag">⚑</span>
+                {task.priority ? [t.pNone, t.pLow, t.pMedium, t.pHigh][task.priority] : t.priority}
+              </button>
+            )}
           </div>
 
-          <textarea className="detail-title" rows={2} value={title} dir={textDir(title)} onChange={(e) => setTitle(e.target.value)} onBlur={saveTexts} maxLength={500} aria-label={t.title} />
+          <AutoText className="desc" value={description} onChange={setDescription} onBlur={saveTexts} maxLength={10000} label={t.description} placeholder={isNote ? t.notePh : t.descriptionPh} />
 
-          <div className="segmented status-seg" role="radiogroup" aria-label={t.status}>
-            {[
-              ['open', t.open],
-              ['in_progress', t.inProgress],
-              ['done', t.done],
-            ].map(([key, label]) => {
-              const on = task.status === key || (key === 'open' && task.status === 'inbox');
-              return (
-                <button key={key} type="button" role="radio" aria-checked={on} className={on ? 'on' : ''} onClick={() => setStatus(key)}>
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="card-list">
-            <div className="row">
-              <span className="row-icon">📅</span>
-              <span className="row-label">{t.due}</span>
-              <div className="row-value two">
-                <input type="date" value={parts.date} aria-label={t.due} onChange={(e) => patchTask(task.id, partsToDue(e.target.value, parts.time))} />
-                <input type="time" value={parts.time} aria-label={t.time} disabled={!parts.date} onChange={(e) => patchTask(task.id, partsToDue(parts.date, e.target.value))} />
-              </div>
-            </div>
-
-            <div className="row">
-              <span className="row-icon">🔁</span>
-              <span className="row-label">{t.repeat}</span>
-              <div className="row-value wrap">
-                <select value={freq} aria-label={t.repeat} onChange={(e) => setRepeat(e.target.value === 'none' ? null : { frequency: e.target.value, interval: rule?.interval || 1 })}>
-                  <option value="none">{t.noRepeat}</option>
-                  <option value="daily">{t.daily}</option>
-                  <option value="weekly">{t.weekly}</option>
-                  <option value="monthly">{t.monthly}</option>
-                  <option value="yearly">{t.yearly}</option>
-                </select>
-                {rule && (
-                  <label className="inline">
-                    {t.every}
-                    <input type="number" min={1} max={365} value={rule.interval} onChange={(e) => setRepeat({ ...rule, interval: Number(e.target.value) || 1 })} className="num" />
-                  </label>
-                )}
-                {rule?.frequency === 'weekly' && (
-                  <select value={rule.weekday ?? ''} aria-label={t.anyDay} onChange={(e) => setRepeat({ ...rule, weekday: e.target.value === '' ? null : Number(e.target.value) })}>
-                    <option value="">{t.anyDay}</option>
-                    {[0, 1, 2, 3, 4, 5, 6].map((d) => (
-                      <option key={d} value={d}>
-                        {weekdayName(d, lang)}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            </div>
-
-            <div className="row">
-              <span className="row-icon">💤</span>
-              <span className="row-label">{t.snooze}</span>
-              <div className="row-value wrap">
-                {snoozed ? (
-                  <>
-                    <span className="muted-small">
-                      {t.snoozedUntil} {fmt.format(new Date(task.snoozed_until))}
-                    </span>
-                    <button type="button" className="chip-btn" onClick={unsnooze}>
-                      {t.unsnooze}
+          {(!isNote || steps.length > 0) && (
+            <div className="field">
+              <span>
+                {task.kind === 'stages' ? t.steps : t.items} {steps.length > 0 && `· ${doneCount}/${steps.length}`}
+              </span>
+              <ul className={`step-list ${task.kind}`}>
+                {steps.map((s, i) => (
+                  <li key={s.id} className={s.done ? 'is-done' : ''}>
+                    <button type="button" className={`check small${s.done ? ' checked' : ''}`} aria-label={s.title} onClick={() => toggleStep(s)}>
+                      {s.done ? '✓' : task.kind === 'stages' ? i + 1 : ''}
                     </button>
-                  </>
-                ) : (
-                  <>
-                    <button type="button" className="chip-btn" onClick={() => snooze(snoozeAt('hour'))}>
-                      {t.inOneHour}
+                    <span dir={textDir(s.title)}>{s.title}</span>
+                    <button type="button" className="icon-btn" aria-label={t.delete} onClick={() => removeStep(s)}>
+                      ×
                     </button>
-                    <button type="button" className="chip-btn" onClick={() => snooze(snoozeAt('tomorrow'))}>
-                      {t.tomorrow}
-                    </button>
-                    <button type="button" className="chip-btn" onClick={() => snooze(snoozeAt('week'))}>
-                      {t.nextWeek}
-                    </button>
-                  </>
-                )}
-              </div>
+                  </li>
+                ))}
+              </ul>
+              <form
+                className="inline-add"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  addStep();
+                }}
+              >
+                <input value={newStep} dir={textDir(newStep)} onChange={(e) => setNewStep(e.target.value)} placeholder={t.addStep} maxLength={500} aria-label={t.addStep} />
+              </form>
             </div>
-
-            <div className="row">
-              <span className="row-icon">🏷</span>
-              <span className="row-label">{t.category}</span>
-              <div className="row-value">
-                <input list="taskai-categories" value={category} dir={textDir(category)} placeholder={t.categoryPh} onChange={(e) => setCategory(e.target.value)} onBlur={saveCategory} maxLength={100} aria-label={t.category} />
-                <datalist id="taskai-categories">
-                  {categories.map((c) => (
-                    <option key={c} value={c} />
-                  ))}
-                </datalist>
-              </div>
-            </div>
-
-            <div className="row">
-              <span className="row-icon">👤</span>
-              <span className="row-label">{t.assignedTo}</span>
-              <div className="row-value">
-                <input list="taskai-people" value={assignee} dir={textDir(assignee)} placeholder={t.assignPh} onChange={(e) => setAssignee(e.target.value)} onBlur={saveAssignee} maxLength={100} aria-label={t.assignedTo} />
-                <datalist id="taskai-people">
-                  {people.map((p) => (
-                    <option key={p} value={p} />
-                  ))}
-                </datalist>
-              </div>
-            </div>
-
-            <div className="row">
-              <span className="row-icon">⚑</span>
-              <span className="row-label">{t.priority}</span>
-              <div className="row-value">
-                <select value={task.priority || 0} aria-label={t.priority} onChange={(e) => patchTask(task.id, { priority: Number(e.target.value) })}>
-                  <option value={0}>{t.pNone}</option>
-                  <option value={1}>{t.pLow}</option>
-                  <option value={2}>{t.pMedium}</option>
-                  <option value={3}>{t.pHigh}</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div className="field">
-            <span>
-              {task.kind === 'stages' ? t.steps : t.items} {steps.length > 0 && `· ${doneCount}/${steps.length}`}
-            </span>
-            <ul className={`step-list ${task.kind}`}>
-              {steps.map((s, i) => (
-                <li key={s.id} className={s.done ? 'is-done' : ''}>
-                  <button type="button" className={`check small${s.done ? ' checked' : ''}`} aria-label={s.title} onClick={() => toggleStep(s)}>
-                    {s.done ? '✓' : task.kind === 'stages' ? i + 1 : ''}
-                  </button>
-                  <span dir={textDir(s.title)}>{s.title}</span>
-                  <button type="button" className="icon-btn" aria-label={t.delete} onClick={() => removeStep(s)}>
-                    ×
-                  </button>
-                </li>
-              ))}
-            </ul>
-            <form
-              className="inline-add"
-              onSubmit={(e) => {
-                e.preventDefault();
-                addStep();
-              }}
-            >
-              <input value={newStep} dir={textDir(newStep)} onChange={(e) => setNewStep(e.target.value)} placeholder={t.addStep} maxLength={500} aria-label={t.addStep} />
-            </form>
-          </div>
-
-          <div className="field">
-            <span>{t.description}</span>
-            <textarea className="desc" rows={2} value={description} dir={textDir(description)} placeholder={t.descriptionPh} onChange={(e) => setDescription(e.target.value)} onBlur={saveTexts} maxLength={10000} aria-label={t.description} />
-          </div>
+          )}
 
           {files.length > 0 && (
             <div className="field">
@@ -517,6 +429,184 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
           </svg>
         </button>
       </form>
+
+      {edit === 'status' && (
+        <Sheet onClose={() => setEdit(null)}>
+          <p className="sheet-title">{t.status}</p>
+          <div className="pick-list">
+            {[
+              ['open', `○ ${t.open}`],
+              ['in_progress', `◐ ${t.inProgress}`],
+              ['done', `✓ ${t.done}`],
+            ].map(([key, label]) => (
+              <button key={key} type="button" className={task.status === key || (key === 'open' && task.status === 'inbox') ? 'on' : ''} onClick={() => { setEdit(null); setStatus(key); }}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </Sheet>
+      )}
+      {edit === 'date' && (
+        <DateSheet
+          t={t}
+          task={task}
+          onClose={() => setEdit(null)}
+          onSave={(patch) => {
+            patchTask(task.id, patch);
+            setEdit(null);
+          }}
+        />
+      )}
+      {edit === 'remind' && (
+        <RemindSheet
+          t={t}
+          lang={lang}
+          current={remindOn ? task.snoozed_until : null}
+          onClose={() => setEdit(null)}
+          onPick={(iso) => {
+            setEdit(null);
+            remind(iso);
+          }}
+          onClear={() => {
+            setEdit(null);
+            unremind();
+          }}
+        />
+      )}
+      {edit === 'repeat' && (
+        <Sheet onClose={() => setEdit(null)}>
+          <p className="sheet-title">{t.repeat}</p>
+          <div className="pick-list">
+            {[
+              ['none', t.noRepeat],
+              ['daily', t.daily],
+              ['weekly', t.weekly],
+              ['monthly', t.monthly],
+              ['yearly', t.yearly],
+            ].map(([key, label]) => (
+              <button key={key} type="button" className={freq === key ? 'on' : ''} onClick={() => setRepeat(key === 'none' ? null : { frequency: key, interval: rule?.interval || 1, weekday: key === 'weekly' ? rule?.weekday ?? null : null })}>
+                {label}
+              </button>
+            ))}
+          </div>
+          {rule && (
+            <div className="field-row two-col">
+              <label className="field">
+                <span>{t.every}</span>
+                <input type="number" min={1} max={365} value={rule.interval} onChange={(e) => setRepeat({ ...rule, interval: Number(e.target.value) || 1 })} />
+              </label>
+              {rule.frequency === 'weekly' && (
+                <label className="field">
+                  <span>{t.anyDay}</span>
+                  <select value={rule.weekday ?? ''} onChange={(e) => setRepeat({ ...rule, weekday: e.target.value === '' ? null : Number(e.target.value) })}>
+                    <option value="">{t.anyDay}</option>
+                    {[0, 1, 2, 3, 4, 5, 6].map((d) => (
+                      <option key={d} value={d}>
+                        {weekdayName(d, lang)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          )}
+          <button type="button" className="primary wide" onClick={() => setEdit(null)}>
+            {t.done}
+          </button>
+        </Sheet>
+      )}
+      {(edit === 'category' || edit === 'assignee') && (
+        <Sheet onClose={() => setEdit(null)}>
+          <p className="sheet-title">{edit === 'category' ? t.category : t.assignedTo}</p>
+          <form
+            className="inline-add"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (edit === 'category') saveCategory(category);
+              else saveAssignee(assignee);
+              setEdit(null);
+            }}
+          >
+            <input
+              autoFocus
+              value={edit === 'category' ? category : assignee}
+              dir={textDir(edit === 'category' ? category : assignee)}
+              placeholder={edit === 'category' ? t.categoryPh : t.assignPh}
+              maxLength={100}
+              onChange={(e) => (edit === 'category' ? setCategory(e.target.value) : setAssignee(e.target.value))}
+            />
+          </form>
+          <div className="chip-row">
+            {(edit === 'category' ? categories : people).map((v) => (
+              <button
+                key={v}
+                type="button"
+                className={`chip-btn${(edit === 'category' ? task.category : task.assignee_name) === v ? ' on' : ''}`}
+                dir={textDir(v)}
+                onClick={() => {
+                  if (edit === 'category') {
+                    setCategory(v);
+                    saveCategory(v);
+                  } else {
+                    setAssignee(v);
+                    saveAssignee(v);
+                  }
+                  setEdit(null);
+                }}
+              >
+                {v}
+              </button>
+            ))}
+          </div>
+          <div className="sheet-row">
+            {(edit === 'category' ? task.category : task.assignee_name) && (
+              <button type="button" className="sheet-btn" onClick={() => { if (edit === 'category') { setCategory(''); saveCategory(''); } else { setAssignee(''); saveAssignee(''); } setEdit(null); }}>
+                {t.clear}
+              </button>
+            )}
+            <button type="button" className="sheet-btn good" onClick={() => { if (edit === 'category') saveCategory(category); else saveAssignee(assignee); setEdit(null); }}>
+              {t.save}
+            </button>
+          </div>
+        </Sheet>
+      )}
+      {edit === 'priority' && (
+        <Sheet onClose={() => setEdit(null)}>
+          <p className="sheet-title">{t.priority}</p>
+          <div className="pick-list">
+            {[t.pNone, t.pLow, t.pMedium, t.pHigh].map((label, i) => (
+              <button key={label} type="button" className={(task.priority || 0) === i ? 'on' : ''} onClick={() => { patchTask(task.id, { priority: i }); setEdit(null); }}>
+                <span className={`flag-dot p${i}`} aria-hidden="true">⚑</span> {label}
+              </button>
+            ))}
+          </div>
+        </Sheet>
+      )}
     </div>
+  );
+}
+
+// A text box that grows with its text, so long descriptions never scroll inside a small box.
+function AutoText({ className, value, onChange, onBlur, maxLength, label, placeholder }) {
+  const ref = useRef(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight + 2}px`;
+  }, [value]);
+  return (
+    <textarea
+      ref={ref}
+      className={className}
+      rows={1}
+      value={value}
+      dir={textDir(value)}
+      placeholder={placeholder}
+      aria-label={label}
+      maxLength={maxLength}
+      onChange={(e) => onChange(e.target.value)}
+      onBlur={onBlur}
+    />
   );
 }

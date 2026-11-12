@@ -8,18 +8,8 @@ import Sheet from './Sheet';
 const pad = (n) => String(n).padStart(2, '0');
 const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
-function snoozeAt(kind) {
-  const d = new Date();
-  if (kind === 'hour') d.setHours(d.getHours() + 1);
-  else {
-    d.setDate(d.getDate() + (kind === 'week' ? 7 : 1));
-    d.setHours(9, 0, 0, 0);
-  }
-  return d.toISOString();
-}
-
-// Set or change a task's date straight from the list, or snooze it.
-export default function DateSheet({ t, task, onSave, onSnooze, onClose }) {
+// Set or change a task's date.
+export default function DateSheet({ t, task, onSave, onClose }) {
   const start = dueToParts(task.due_at, task.due_has_time);
   const [date, setDate] = useState(start.date);
   const [time, setTime] = useState(start.time);
@@ -39,7 +29,7 @@ export default function DateSheet({ t, task, onSave, onSnooze, onClose }) {
           {t.fToday}
         </button>
         <button type="button" className="chip-btn" onClick={() => quick(1)}>
-          {t.tomorrow.replace(/ ?09:00/, '')}
+          {t.tomorrowDay}
         </button>
         <button type="button" className="chip-btn" onClick={() => quick(7)}>
           {t.nextWeek}
@@ -62,22 +52,6 @@ export default function DateSheet({ t, task, onSave, onSnooze, onClose }) {
         <button type="button" className="sheet-btn" onClick={() => onSave({ due_at: null, due_has_time: false })}>
           {t.clearDate}
         </button>
-      )}
-      {task.status !== 'done' && (
-        <>
-          <p className="sheet-sub">{t.snooze}</p>
-          <div className="chip-row">
-            <button type="button" className="chip-btn" onClick={() => onSnooze(snoozeAt('hour'))}>
-              {t.inOneHour}
-            </button>
-            <button type="button" className="chip-btn" onClick={() => onSnooze(snoozeAt('tomorrow'))}>
-              {t.tomorrow}
-            </button>
-            <button type="button" className="chip-btn" onClick={() => onSnooze(snoozeAt('week'))}>
-              {t.nextWeek}
-            </button>
-          </div>
-        </>
       )}
     </Sheet>
   );

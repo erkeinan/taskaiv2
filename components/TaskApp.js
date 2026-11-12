@@ -16,6 +16,8 @@ import TaskPage from './TaskPage';
 import SettingsSheet from './SettingsSheet';
 import AssistantChat from './AssistantChat';
 import DateSheet from './DateSheet';
+import RemindSheet from './RemindSheet';
+import MemorySheet from './MemorySheet';
 
 // Only the columns the list shows. Never the whole row set, never in a loop.
 const COLS =
@@ -58,6 +60,8 @@ export default function TaskApp() {
   const [view, setView] = useState(null); // {type:'assistant'} | {type:'task', id}
   const [pending, setPending] = useState(null);
   const [dateFor, setDateFor] = useState(null);
+  const [remindFor, setRemindFor] = useState(null);
+  const [memoryOpen, setMemoryOpen] = useState(false);
   const [confirmDel, setConfirmDel] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [prefs, setPrefs] = useState(DEFAULT_PREFS);
@@ -357,6 +361,29 @@ export default function TaskApp() {
           saved.push({ id, title: row.title, kind: 'created' });
           continue;
         }
+        if (a.type === 'create_note') {
+          const id = crypto.randomUUID();
+          refs[a.ref] = id;
+          const row = {
+            id,
+            workspace_id: workspaceId,
+            title: String(a.title).slice(0, 500),
+            kind: 'note',
+            status: 'open',
+            category: a.category || null,
+            details: String(a.body || '').slice(0, 10000) || null,
+            source_kind: 'chat',
+          };
+          setTasks((prev) => [{ ...row, details: undefined, preview: (a.body || '').slice(0, 120), steps_total: 0, steps_done: 0, created_at: new Date().toISOString() }, ...prev]);
+          const { error: err } = await supabase.from('tasks').insert(row);
+          if (err) throw err;
+          saved.push({ id, title: row.title, kind: 'created', note: true });
+          continue;
+        }
+        if (a.type === 'remember') {
+          await supabase.from('memory_facts').insert({ subject: a.subject || null, fact: String(a.fact).slice(0, 2000), category: 'other', source: 'chat' });
+          continue;
+        }
         const id = refs[a.task_id] || a.task_id;
         switch (a.type) {
           case 'add_step':
@@ -392,9 +419,40 @@ export default function TaskApp() {
   }
 
   // ---- capture from the home screen ----
-  function askAssistant(note, attachment) {
+  function askAssistant(note, attachment, extra = {}) {
     setText('');
-    setPending({ text: note, attachment, at: Date.now() });
+    setPending({ text: note, attachment, at: Date.now(), ...extra });
+    openView({ type: 'assistant' });
+  }
+
+  // Task: the AI organizes it (date, list, link to an existing task); without AI it goes to the Inbox.
+  function addAsTask() {
+    const v = text.trim();
+    if (!v) return;
+    if (ai?.hasKey) askAssistant(v, null, { mode: 'task' });
+    else saveToInbox();
+  }
+
+  // Note: kept as written, at once. No AI round trip, no date questions.
+  async function addAsNote() {
+    const v = text.trim();
+    if (!v || !workspaceId) return;
+    const firstLine = v.split('\n')[0];
+    const title = firstLine.length > 80 ? `${firstLine.slice(0, 77)}…` : firstLine;
+    const row = { id: crypto.randomUUID(), workspace_id: workspaceId, title, kind: 'note', status: 'open', details: v !== title ? v.slice(0, 10000) : null, source_kind: 'text' };
+    setText('');
+    setFilter('notes');
+    setTasks((prev) => [{ ...row, details: undefined, preview: row.details ? row.details.slice(0, 120) : null, steps_total: 0, steps_done: 0, created_at: new Date().toISOString() }, ...prev]);
+    const { error: err } = await getSupabase().from('tasks').insert(row);
+    if (err) {
+      setError(err.message);
+      setTasks((prev) => prev.filter((x) => x.id !== row.id));
+    }
+  }
+
+  function startVoice() {
+    setText('');
+    setPending({ voice: true, at: Date.now() });
     openView({ type: 'assistant' });
   }
 
@@ -419,6 +477,35 @@ export default function TaskApp() {
       setError(e.message);
     }
   }
+
+  // Something shared from another app (Android share menu): the service worker kept it for us.
+  useEffect(() => {
+    if (!session || !workspaceId) return;
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has('share')) return;
+    window.history.replaceState(null, '', '/');
+    (async () => {
+      try {
+        const cache = await caches.open('taskai-share');
+        const meta = await cache.match('/share/meta');
+        const info = meta ? await meta.json() : {};
+        const fileRes = await cache.match('/share/file');
+        await cache.delete('/share/meta');
+        await cache.delete('/share/file');
+        const note = [info.title, info.text, info.url].filter(Boolean).join('\n').trim();
+        let att = null;
+        if (fileRes) {
+          const blob = await fileRes.blob();
+          const name = decodeURIComponent(fileRes.headers.get('x-name') || 'shared');
+          att = await prepareFile(new File([blob], name, { type: blob.type }), 'screenshot');
+        }
+        if (att || note) askAssistant(note, att);
+      } catch (e) {
+        setError(e.message || t.error);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, workspaceId]);
 
   useEffect(() => {
     if (!session || view?.type === 'assistant' || settingsOpen) return undefined;
@@ -496,7 +583,19 @@ export default function TaskApp() {
       const nowMs = Date.now();
       let changed = false;
       for (const task of tasksRef.current) {
-        if (!task.due_at || task.status === 'done') continue;
+        if (task.status === 'done') continue;
+        if (task.snoozed_until) {
+          const at = Date.parse(task.snoozed_until);
+          const rkey = `r:${task.id}:${task.snoozed_until}`;
+          if (nowMs >= at && nowMs < at + 3600000 && !sent[rkey]) {
+            sent[rkey] = nowMs;
+            changed = true;
+            navigator.serviceWorker?.ready
+              .then((reg) => reg.showNotification(t.reminderTitle, { body: task.title, tag: rkey, icon: '/icons/icon-192.png' }))
+              .catch(() => {});
+          }
+        }
+        if (!task.due_at) continue;
         if (task.snoozed_until && Date.parse(task.snoozed_until) > nowMs) continue;
         const due = Date.parse(task.due_at);
         const key = `${task.id}:${task.due_at}`;
@@ -544,19 +643,24 @@ export default function TaskApp() {
   };
   const sortFn = sorters[prefs.sort] || sorters.due;
   const query = text.trim().toLowerCase();
-  const open = tasks.filter((x) => x.status !== 'done');
-  const done = tasks.filter((x) => x.status === 'done');
+  const notes = tasks.filter((x) => x.kind === 'note');
+  const onlyTasks = tasks.filter((x) => x.kind !== 'note');
+  const open = onlyTasks.filter((x) => x.status !== 'done');
+  const done = onlyTasks.filter((x) => x.status === 'done');
   let shown;
   if (filter === 'done') shown = [...done].sort((a, b) => Date.parse(b.completed_at || b.created_at) - Date.parse(a.completed_at || a.created_at));
   else if (filter === 'archived') shown = archived || [];
+  else if (filter === 'notes') shown = [...notes].sort((a, b) => Date.parse(b.updated_at || b.created_at) - Date.parse(a.updated_at || a.created_at));
   else {
     let base = open;
     if (filter === 'today') base = open.filter(isToday);
     else if (filter === 'overdue') base = open.filter(isOverdue);
     else if (filter === 'inbox') base = open.filter((x) => x.status === 'inbox');
-    else if (filter.startsWith('cat:')) base = open.filter((x) => x.category === filter.slice(4));
+    else if (filter.startsWith('cat:')) base = [...open, ...notes].filter((x) => x.category === filter.slice(4));
     shown = [...base.filter((x) => !isSnoozed(x)).sort(sortFn), ...base.filter(isSnoozed).sort(sortFn)];
   }
+  // searching looks through notes too
+  if (query && filter === 'all') shown = [...shown, ...notes];
   if (query) shown = shown.filter((x) => x.title.toLowerCase().includes(query) || (x.category || '').toLowerCase().includes(query));
   const usedCategories = [...new Set(tasks.map((x) => x.category).filter(Boolean))];
   const categories = [...new Set([...usedCategories, ...DEFAULT_CATEGORIES])];
@@ -566,13 +670,14 @@ export default function TaskApp() {
   const fmtClock = new Intl.DateTimeFormat(lang === 'he' ? 'he-IL' : 'en-GB', { hour: '2-digit', minute: '2-digit' });
   const detailTask = view?.type === 'task' ? tasks.find((x) => x.id === view.id) || archived?.find((x) => x.id === view.id) : null;
   const dateTask = dateFor ? tasks.find((x) => x.id === dateFor) : null;
+  const remindTask = remindFor ? tasks.find((x) => x.id === remindFor) : null;
 
   function rowProps(task) {
     const isDone = task.status === 'done';
     let dateLabel = '';
     let dateTone = '';
     if (!isDone && isSnoozed(task)) {
-      dateLabel = `💤 ${fmtSnooze.format(new Date(task.snoozed_until))}`;
+      dateLabel = `⏰ ${fmtSnooze.format(new Date(task.snoozed_until))}`;
       dateTone = 'snoozed';
     } else if (task.due_at) {
       dateLabel = dueLabel(task.due_at, task.due_has_time, lang);
@@ -583,7 +688,7 @@ export default function TaskApp() {
     if (task.steps_total > 0) subParts.push(`☑ ${task.steps_done}/${task.steps_total}`);
     if (task.category) subParts.push(task.category);
     if (task.assignee_name) subParts.push(`👤 ${task.assignee_name}`);
-    if (task.preview) subParts.push(task.preview);
+    if (task.preview && task.preview !== task.title) subParts.push(task.preview);
     const badges = (
       <>
         {task.recurrence && <span title={repeatLabel(task.recurrence, lang)}>🔁</span>}
@@ -592,10 +697,16 @@ export default function TaskApp() {
         {task.priority > 0 && !isDone && <span className={`prio-dot p${task.priority}`} />}
       </>
     );
+    const isNote = task.kind === 'note';
     let actions;
     if (task.archived_at)
       actions = [
         { key: 'restore', label: t.restore, tone: 'neutral', onClick: () => restore(task.id) },
+        { key: 'delete', label: t.delete, tone: 'danger', onClick: () => setConfirmDel(task.id) },
+      ];
+    else if (isNote)
+      actions = [
+        { key: 'archive', label: t.archive, tone: 'calm', onClick: () => archive(task.id) },
         { key: 'delete', label: t.delete, tone: 'danger', onClick: () => setConfirmDel(task.id) },
       ];
     else if (isDone)
@@ -607,7 +718,7 @@ export default function TaskApp() {
     else
       actions = [
         { key: 'done', label: t.done, tone: 'good', onClick: () => markDone(task) },
-        { key: 'snooze', label: t.snooze, tone: 'warn', onClick: () => setDateFor(task.id) },
+        { key: 'snooze', label: t.remind, tone: 'warn', onClick: () => setRemindFor(task.id) },
       ];
     return {
       task,
@@ -620,7 +731,8 @@ export default function TaskApp() {
       subtitle: subParts.join(' · ') || (task.category ?? ''),
       badges,
       onOpen: () => openView({ type: 'task', id: task.id }),
-      onDate: () => setDateFor(task.id),
+      onDate: isNote ? null : () => setDateFor(task.id),
+      note: isNote,
     };
   }
 
@@ -632,6 +744,7 @@ export default function TaskApp() {
     ['today', `${t.fToday}${counts.today ? ` ${counts.today}` : ''}`],
     ['overdue', `${t.fOverdue}${counts.overdue ? ` ${counts.overdue}` : ''}`],
     ['inbox', `${t.fInbox}${counts.inbox ? ` ${counts.inbox}` : ''}`],
+    ['notes', `📝 ${t.notes}`],
     ['done', t.fDone],
     ['archived', t.fArchived],
     ...usedCategories.map((c) => [`cat:${c}`, c]),
@@ -691,9 +804,15 @@ export default function TaskApp() {
                 <circle cx="12" cy="13" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
               </svg>
             </button>
+            <button type="button" className="icon-top" aria-label={t.recordVoice} title={t.recordVoice} onClick={startVoice}>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" strokeWidth="1.8" />
+                <path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+              </svg>
+            </button>
             <button type="button" className="icon-top" aria-label={t.attach} title={t.attach} onClick={() => fileRef.current?.click()}>
               <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M16.5 7.5l-7 7a2.5 2.5 0 003.5 3.5l7.5-7.5a4.5 4.5 0 00-6.4-6.4L6.4 11.8a6.5 6.5 0 009.2 9.2l5-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                <path d="M12 4.5v15M4.5 12h15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
               </svg>
             </button>
             <button type="button" className="icon-top" aria-label={t.settings} title={t.settings} onClick={() => setSettingsOpen(true)}>
@@ -712,9 +831,7 @@ export default function TaskApp() {
           className="searchbar"
           onSubmit={(e) => {
             e.preventDefault();
-            if (!text.trim()) return;
-            if (ai?.hasKey) askAssistant(text.trim(), null);
-            else saveToInbox();
+            addAsTask();
           }}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true" className="search-icon">
@@ -734,14 +851,21 @@ export default function TaskApp() {
               ×
             </button>
           )}
+          <button type="submit" className="search-send" aria-label={t.addTask} disabled={!text.trim()}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
         </form>
         {text.trim() && (
           <div className="capture-choices">
-            <button type="button" className="choice primary-soft" onClick={() => askAssistant(text.trim(), null)}>
-              ✦ {t.askAI}
+            <button type="button" className="choice primary-soft" onClick={addAsTask}>
+              <span aria-hidden="true">✓</span> {t.addTask}
+              {ai?.hasKey && <small>{t.aiOrganizes}</small>}
             </button>
-            <button type="button" className="choice" onClick={saveToInbox}>
-              + {t.toInbox}
+            <button type="button" className="choice" onClick={addAsNote}>
+              <span aria-hidden="true">📝</span> {t.addNote}
+              <small>{t.keepAsWritten}</small>
             </button>
           </div>
         )}
@@ -788,7 +912,7 @@ export default function TaskApp() {
         </ul>
         {shown.length === 0 && (
           <p className="empty">
-            {query ? `${t.noMatch} ${ai?.hasKey ? t.noMatchAdd : ''}` : filter === 'done' ? t.emptyDone : filter === 'archived' ? t.emptyArchived : filter === 'all' ? t.empty : t.emptyFilter}
+            {query ? t.noMatch : filter === 'done' ? t.emptyDone : filter === 'archived' ? t.emptyArchived : filter === 'notes' ? t.emptyNotes : filter === 'all' ? t.empty : t.emptyFilter}
           </p>
         )}
         {filter === 'all' && open.length > 0 && open.length < 4 && <p className="hint">{t.swipeHint}</p>}
@@ -818,12 +942,27 @@ export default function TaskApp() {
             patchTask(dateTask.id, patch);
             setDateFor(null);
           }}
-          onSnooze={(iso) => {
-            patchTask(dateTask.id, { snoozed_until: iso });
-            setDateFor(null);
+        />
+      )}
+
+      {remindTask && (
+        <RemindSheet
+          t={t}
+          lang={lang}
+          current={isSnoozed(remindTask) ? remindTask.snoozed_until : null}
+          onClose={() => setRemindFor(null)}
+          onPick={(iso) => {
+            patchTask(remindTask.id, { snoozed_until: iso });
+            setRemindFor(null);
+          }}
+          onClear={() => {
+            patchTask(remindTask.id, { snoozed_until: null });
+            setRemindFor(null);
           }}
         />
       )}
+
+      {memoryOpen && <MemorySheet t={t} onClose={() => setMemoryOpen(false)} />}
 
       {justDone && !celebrate && (
         <Sheet onClose={() => setJustDone(null)}>
@@ -866,6 +1005,10 @@ export default function TaskApp() {
           onAIChange={updateAi}
           onToggleLang={toggleLang}
           onSignOut={signOut}
+          onOpenMemory={() => {
+            setSettingsOpen(false);
+            setMemoryOpen(true);
+          }}
           onClose={() => setSettingsOpen(false)}
         />
       )}

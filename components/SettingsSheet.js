@@ -16,7 +16,7 @@ function langName(code, uiLang) {
 }
 
 // All settings from the old app, plus the AI connection.
-export default function SettingsSheet({ t, lang, prefs, onPrefs, ai, onAIChange, onToggleLang, onTryCelebration, alerts, onAlerts, onSignOut, onClose }) {
+export default function SettingsSheet({ t, lang, prefs, onPrefs, ai, onAIChange, onToggleLang, onTryCelebration, alerts, onAlerts, onSignOut, onOpenMemory, onClose }) {
   const [provider, setProvider] = useState(ai?.provider || 'openai');
   const [model, setModel] = useState(ai?.provider ? ai.model || '' : '');
   const [apiKey, setApiKey] = useState('');
@@ -157,6 +157,14 @@ export default function SettingsSheet({ t, lang, prefs, onPrefs, ai, onAIChange,
             🔔 {t.enableAlerts}
           </button>
         )}
+      </section>
+
+      <section className="settings-block">
+        <h3>🧠 {t.memoryTitle}</h3>
+        <p className="status-line">{t.memoryHelp}</p>
+        <button type="button" className="sheet-btn" onClick={onOpenMemory}>
+          {t.memOpen}
+        </button>
       </section>
 
       <section className="settings-block">

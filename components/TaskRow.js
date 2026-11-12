@@ -5,7 +5,7 @@ import { textDir } from '@/lib/i18n';
 
 const OPEN_WIDTH = 168;
 const THRESHOLD = 64;
-const AVATAR_COLORS = ['#25a18e', '#6d3a83', '#2f6f9f', '#c2410c', '#b0405e', '#4f7d63', '#a8640a', '#5b6b85'];
+const AVATAR_COLORS = ['#7b4f8b', '#25a18e', '#2f6f9f', '#c2410c', '#b0405e', '#4f7d63', '#a8640a', '#5b6b85'];
 
 function avatarFor(task) {
   const label = task.category || task.title || '?';
@@ -15,8 +15,8 @@ function avatarFor(task) {
 }
 
 // A WhatsApp-style row: avatar, title, one-line preview, date on the right.
-// Swipe in the reading direction for Done / Snooze. Tap the date to change it.
-export default function TaskRow({ task, uiDir, done, selected, actions, onOpen, onDate, dateLabel, dateTone, subtitle, badges }) {
+// Swipe in the reading direction for Done / Remind. Tap the date to change it.
+export default function TaskRow({ task, uiDir, done, selected, actions, onOpen, onDate, dateLabel, dateTone, subtitle, badges, note }) {
   const [drag, setDrag] = useState(0);
   const [revealed, setRevealed] = useState(false);
   const gesture = useRef(null);
@@ -83,17 +83,21 @@ export default function TaskRow({ task, uiDir, done, selected, actions, onOpen, 
           setDrag(0);
         }}
       >
-        <span className="avatar" style={{ background: done ? 'var(--muted)' : av.color }} aria-hidden="true">
-          {done ? '✓' : av.letter}
+        <span className={`avatar${note ? ' note' : ''}`} style={note ? undefined : { background: done ? 'var(--muted)' : av.color }} aria-hidden="true">
+          {note ? '📝' : done ? '✓' : av.letter}
         </span>
         <div className="wa-main">
           <div className="wa-line">
             <span className="wa-title" dir={textDir(task.title)}>
               {task.title}
             </span>
-            <button type="button" className={`wa-date ${dateTone || ''}`} onClick={onDate}>
-              {dateLabel || '📅'}
-            </button>
+            {onDate ? (
+              <button type="button" className={`wa-date ${dateTone || ''}`} onClick={onDate}>
+                {dateLabel || '📅'}
+              </button>
+            ) : (
+              dateLabel && <span className={`wa-date ${dateTone || ''}`}>{dateLabel}</span>
+            )}
           </div>
           <div className="wa-line">
             <span className="wa-sub" dir={textDir(subtitle)}>
