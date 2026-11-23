@@ -208,7 +208,10 @@ export default function TaskApp() {
       .then(({ data }) => {
         if (!data) return;
         setDisplayName(data.display_name || '');
-        if (isLang(data.locale) && data.locale !== readLocal('taskai.lang', 'en')) {
+        // a language chosen on this device wins (for example on the sign-in screen); otherwise use the account's
+        const local = readLocal('taskai.lang', null);
+        if (isLang(local) && local !== data.locale) supabase.from('profiles').update({ locale: local }).eq('id', userId).then(() => {});
+        else if (!isLang(local) && isLang(data.locale)) {
           setLang(data.locale);
           writeLocal('taskai.lang', data.locale);
         }
@@ -745,7 +748,7 @@ export default function TaskApp() {
   }, [alerts, prefs.remindMinutes, lang, t.reminderTitle]);
 
   function setLanguage(next) {
-    if (!isLang(next) || next === lang) return;
+    if (!isLang(next)) return;
     setLang(next);
     writeLocal('taskai.lang', next);
     if (userId) getSupabase().from('profiles').update({ locale: next }).eq('id', userId).then(() => {});
