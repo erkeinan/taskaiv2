@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getSupabase } from '@/lib/supabase';
-import { strings, textDir } from '@/lib/i18n';
+import { strings, textDir, localeOf, isLang } from '@/lib/i18n';
+import { haptic } from '@/lib/haptics';
+import Icon from './Icon';
 import { callAI, timeZone } from '@/lib/ai';
 import { prepareFile } from '@/lib/media';
 import { dueLabel, partsToDue } from '@/lib/dates';
@@ -68,6 +70,12 @@ export default function TaskApp() {
   const [alerts, setAlerts] = useState('off');
   const [lastChat, setLastChat] = useState(null);
   const [wide, setWide] = useState(false);
+  const [displayName, setDisplayName] = useState('');
+  const [joinToken, setJoinToken] = useState(null);
+  const [invite, setInvite] = useState(null); // { title, shared_by_name } shown before signing in
+  const [receivedIds, setReceivedIds] = useState(() => new Set()); // tasks others shared with me
+  const [sharingIds, setSharingIds] = useState(() => new Set()); // my tasks that others joined
+  const [toast, setToast] = useState('');
   const cameraRef = useRef(null);
   const chipsRef = useRef(null);
   const fileRef = useRef(null);
@@ -76,12 +84,17 @@ export default function TaskApp() {
 
   const t = strings[lang];
   const uiDir = lang === 'he' ? 'rtl' : 'ltr';
+  const showToast = useCallback((msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(''), 2600);
+  }, []);
   const endCelebrate = useCallback(() => setCelebrate(false), []);
   const userId = session?.user?.id ?? null;
 
   // ---- language, prefs, layout size ----
   useEffect(() => {
-    setLang(readLocal('taskai.lang', 'en') === 'he' ? 'he' : 'en');
+    const savedLang = readLocal('taskai.lang', null);
+    setLang(isLang(savedLang) ? savedLang : (navigator.language || 'en').slice(0, 2) === 'es' ? 'es' : (navigator.language || '').startsWith('he') ? 'he' : 'en');
     setPrefs({ ...DEFAULT_PREFS, ...readLocal('taskai.prefs', {}) });
     const cached = readLocal('taskai.chat', []);
     if (cached.length) setLastChat(cached.at(-1));
@@ -189,12 +202,13 @@ export default function TaskApp() {
       });
     supabase
       .from('profiles')
-      .select('locale,theme,accent,celebration,remind_minutes,time_zone,prefs')
+      .select('locale,theme,accent,celebration,remind_minutes,time_zone,prefs,display_name')
       .eq('id', userId)
       .maybeSingle()
       .then(({ data }) => {
         if (!data) return;
-        if (data.locale && data.locale !== readLocal('taskai.lang', 'en')) {
+        setDisplayName(data.display_name || '');
+        if (isLang(data.locale) && data.locale !== readLocal('taskai.lang', 'en')) {
           setLang(data.locale);
           writeLocal('taskai.lang', data.locale);
         }
@@ -217,6 +231,21 @@ export default function TaskApp() {
     if (userId) writeLocal(`taskai.ai.${userId}`, res);
   };
 
+  // one live change to one task row
+  const onTaskChange = useCallback((payload) => {
+    setTasks((prev) => {
+      if (payload.eventType === 'DELETE') return prev.filter((x) => x.id !== payload.old.id);
+      const row = payload.new;
+      if (!visible(row)) return prev.filter((x) => x.id !== row.id);
+      const slim = Object.fromEntries(COLS.split(',').map((k) => [k, row[k]]));
+      const i = prev.findIndex((x) => x.id === row.id);
+      if (i === -1) return [slim, ...prev];
+      const next = prev.slice();
+      next[i] = { ...prev[i], ...slim };
+      return next;
+    });
+  }, []);
+
   // ---- tasks: saved copy at once, one load, then only live changes ----
   useEffect(() => {
     if (!workspaceId) return undefined;
@@ -237,23 +266,11 @@ export default function TaskApp() {
           if (navigator.onLine) setError(err.message);
           return;
         }
-        setTasks(data);
+        setTasks((prev) => [...data, ...prev.filter((x) => x.workspace_id !== workspaceId)]);
       });
     const channel = supabase
       .channel(`tasks-${workspaceId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks', filter: `workspace_id=eq.${workspaceId}` }, (payload) => {
-        setTasks((prev) => {
-          if (payload.eventType === 'DELETE') return prev.filter((x) => x.id !== payload.old.id);
-          const row = payload.new;
-          if (!visible(row)) return prev.filter((x) => x.id !== row.id);
-          const slim = Object.fromEntries(COLS.split(',').map((k) => [k, row[k]]));
-          const i = prev.findIndex((x) => x.id === row.id);
-          if (i === -1) return [slim, ...prev];
-          const next = prev.slice();
-          next[i] = { ...prev[i], ...slim };
-          return next;
-        });
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks', filter: `workspace_id=eq.${workspaceId}` }, onTaskChange)
       .subscribe();
     return () => {
       cancelled = true;
@@ -264,6 +281,95 @@ export default function TaskApp() {
   useEffect(() => {
     if (workspaceId) writeLocal(`taskai.tasks.${workspaceId}`, tasks);
   }, [tasks, workspaceId]);
+
+  // ---- shared tasks: ones others shared with me, and mine that others joined ----
+  const loadShares = useCallback(async () => {
+    if (!userId || !workspaceId) return;
+    const supabase = getSupabase();
+    const { data: shares } = await supabase.from('task_shares').select('task_id,recipient_id,shared_by,status').in('status', ['accepted', 'done']).limit(500);
+    const received = new Set();
+    const sharing = new Set();
+    for (const sh of shares || []) {
+      if (sh.recipient_id === userId) received.add(sh.task_id);
+      else sharing.add(sh.task_id);
+    }
+    setReceivedIds(received);
+    setSharingIds(sharing);
+    if (!received.size) {
+      setTasks((prev) => prev.filter((x) => x.workspace_id === workspaceId));
+      return;
+    }
+    const { data } = await supabase.from('tasks').select(COLS).in('id', [...received]).is('deleted_at', null);
+    setTasks((prev) => [...prev.filter((x) => x.workspace_id === workspaceId), ...(data || []).filter(visible)]);
+  }, [userId, workspaceId]);
+  useEffect(() => {
+    loadShares();
+  }, [loadShares]);
+  // live changes to tasks shared with me
+  const receivedKey = [...receivedIds].sort().join(',');
+  useEffect(() => {
+    if (!receivedKey) return undefined;
+    const supabase = getSupabase();
+    const channel = supabase
+      .channel(`shared-${receivedKey.length}-${receivedKey.slice(0, 36)}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks', filter: `id=in.(${receivedKey})` }, onTaskChange)
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [receivedKey, onTaskChange]);
+  // someone joined one of my tasks, or I joined one: refresh the small share list
+  useEffect(() => {
+    if (!userId) return undefined;
+    const supabase = getSupabase();
+    const channel = supabase
+      .channel(`shares-${userId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'task_shares' }, () => loadShares())
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [userId, loadShares]);
+
+  // ---- invite links: ?join=<token> ----
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get('join');
+    if (fromUrl) {
+      writeLocal('taskai.join', fromUrl);
+      window.history.replaceState(null, '', '/');
+    }
+    const token = fromUrl || readLocal('taskai.join', null);
+    if (!token) return;
+    setJoinToken(token);
+    getSupabase()
+      .rpc('share_preview', { p_token: token })
+      .then(({ data }) => {
+        if (data?.[0]) setInvite(data[0]);
+      });
+  }, []);
+  useEffect(() => {
+    if (!joinToken || !userId || !workspaceId) return;
+    (async () => {
+      const supabase = getSupabase();
+      const { data: taskId, error: err } = await supabase.rpc('accept_share', { p_token: joinToken });
+      try {
+        localStorage.removeItem('taskai.join');
+      } catch {
+        /* ignore */
+      }
+      setJoinToken(null);
+      setInvite(null);
+      if (err) {
+        setError(err.message);
+        return;
+      }
+      await loadShares();
+      showToast(t.joined);
+      openView({ type: 'task', id: taskId });
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [joinToken, userId, workspaceId]);
 
   // archived tasks load only when that filter is opened
   useEffect(() => {
@@ -310,13 +416,14 @@ export default function TaskApp() {
 
   async function uploadFile(att, taskId) {
     const fileId = crypto.randomUUID();
-    const path = `${workspaceId}/${fileId}-${safeName(att.name)}`;
+    const ws = tasksRef.current.find((x) => x.id === taskId)?.workspace_id || workspaceId;
+    const path = `${ws}/${fileId}-${safeName(att.name)}`;
     const supabase = getSupabase();
     const up = await supabase.storage.from('files').upload(path, att.blob, { contentType: att.mime, upsert: false });
     if (up.error) throw up.error;
     const { error: err } = await supabase.from('files').insert({
       id: fileId,
-      workspace_id: workspaceId,
+      workspace_id: ws,
       task_id: taskId,
       storage_path: path,
       name: att.name.slice(0, 255),
@@ -324,6 +431,7 @@ export default function TaskApp() {
       size_bytes: att.blob.size,
     });
     if (err) throw err;
+    return { id: fileId, name: att.name.slice(0, 255), mime: att.mime, storage_path: path };
   }
 
   // Apply what the assistant decided. Returns [{id, title, kind: 'created'|'updated'}].
@@ -382,7 +490,9 @@ export default function TaskApp() {
           continue;
         }
         if (a.type === 'remember') {
-          await supabase.from('memory_facts').insert({ subject: a.subject || null, fact: String(a.fact).slice(0, 2000), category: 'other', source: 'chat' });
+          const fact = String(a.fact).slice(0, 2000);
+          const { data: same } = await supabase.from('memory_facts').select('id').ilike('fact', fact.replace(/[%_\\]/g, (c) => `\\${c}`)).limit(1);
+          if (!same?.length) await supabase.from('memory_facts').insert({ subject: a.subject || null, fact, category: 'other', source: 'chat' });
           continue;
         }
         const id = refs[a.task_id] || a.task_id;
@@ -536,8 +646,23 @@ export default function TaskApp() {
   // ---- task actions ----
   function markDone(task) {
     patchTask(task.id, { status: 'done', completed_at: new Date().toISOString(), snoozed_until: null });
+    haptic('success');
     setCelebrate(true);
-    setJustDone(task.id);
+    if (task.workspace_id === workspaceId) setJustDone(task.id);
+  }
+
+  // leave a task someone shared with me (it stays for them)
+  async function leaveTask(id) {
+    if (view?.type === 'task' && view.id === id) closeView();
+    setTasks((prev) => prev.filter((x) => x.id !== id));
+    await getSupabase().from('task_shares').update({ status: 'declined' }).eq('task_id', id).eq('recipient_id', userId);
+    loadShares();
+  }
+
+  async function saveDisplayName(name) {
+    const v = name.trim().slice(0, 60);
+    setDisplayName(v);
+    if (userId) await getSupabase().from('profiles').update({ display_name: v || null }).eq('id', userId);
   }
   const reopen = (task) => patchTask(task.id, { status: 'open', completed_at: null });
   function archive(id) {
@@ -619,8 +744,8 @@ export default function TaskApp() {
     return () => clearInterval(id);
   }, [alerts, prefs.remindMinutes, lang, t.reminderTitle]);
 
-  function toggleLang() {
-    const next = lang === 'en' ? 'he' : 'en';
+  function setLanguage(next) {
+    if (!isLang(next) || next === lang) return;
     setLang(next);
     writeLocal('taskai.lang', next);
     if (userId) getSupabase().from('profiles').update({ locale: next }).eq('id', userId).then(() => {});
@@ -657,6 +782,7 @@ export default function TaskApp() {
   let shown;
   if (filter === 'done') shown = [...done].sort((a, b) => Date.parse(b.completed_at || b.created_at) - Date.parse(a.completed_at || a.created_at));
   else if (filter === 'archived') shown = archived || [];
+  else if (filter === 'shared') shown = tasks.filter((x) => receivedIds.has(x.id) || sharingIds.has(x.id)).sort(sortFn);
   else if (filter === 'notes') shown = [...notes].sort((a, b) => Date.parse(b.updated_at || b.created_at) - Date.parse(a.updated_at || a.created_at));
   else {
     let base = open;
@@ -673,8 +799,8 @@ export default function TaskApp() {
   const categories = [...new Set([...usedCategories, ...DEFAULT_CATEGORIES])];
   const people = [...new Set(tasks.map((x) => x.assignee_name).filter(Boolean))];
   const counts = { today: open.filter(isToday).length, overdue: open.filter(isOverdue).length, inbox: open.filter((x) => x.status === 'inbox').length };
-  const fmtSnooze = new Intl.DateTimeFormat(lang === 'he' ? 'he-IL' : 'en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' });
-  const fmtClock = new Intl.DateTimeFormat(lang === 'he' ? 'he-IL' : 'en-GB', { hour: '2-digit', minute: '2-digit' });
+  const fmtSnooze = new Intl.DateTimeFormat(localeOf(lang), { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  const fmtClock = new Intl.DateTimeFormat(localeOf(lang), { hour: '2-digit', minute: '2-digit' });
   const detailTask = view?.type === 'task' ? tasks.find((x) => x.id === view.id) || archived?.find((x) => x.id === view.id) : null;
   const dateTask = dateFor ? tasks.find((x) => x.id === dateFor) : null;
   const remindTask = remindFor ? tasks.find((x) => x.id === remindFor) : null;
@@ -684,7 +810,11 @@ export default function TaskApp() {
     let dateLabel = '';
     let dateTone = '';
     if (!isDone && isSnoozed(task)) {
-      dateLabel = `⏰ ${fmtSnooze.format(new Date(task.snoozed_until))}`;
+      dateLabel = (
+        <span className="inline-ico">
+          <Icon name="bell" size={14} /> {fmtSnooze.format(new Date(task.snoozed_until))}
+        </span>
+      );
       dateTone = 'snoozed';
     } else if (task.due_at) {
       dateLabel = dueLabel(task.due_at, task.due_has_time, lang);
@@ -692,21 +822,31 @@ export default function TaskApp() {
     }
     const subParts = [];
     if (task.status === 'in_progress') subParts.push(t.inProgress);
-    if (task.steps_total > 0) subParts.push(`☑ ${task.steps_done}/${task.steps_total}`);
+    if (task.steps_total > 0) subParts.push(`${task.steps_done}/${task.steps_total}`);
     if (task.category) subParts.push(task.category);
-    if (task.assignee_name) subParts.push(`👤 ${task.assignee_name}`);
+    if (task.assignee_name) subParts.push(task.assignee_name);
     if (task.preview && task.preview !== task.title) subParts.push(task.preview);
     const badges = (
       <>
-        {task.recurrence && <span title={repeatLabel(task.recurrence, lang)}>🔁</span>}
+        {task.recurrence && (
+          <span title={repeatLabel(task.recurrence, lang)}>
+            <Icon name="repeat" size={15} />
+          </span>
+        )}
         {task.status === 'inbox' && <span className="pill tiny">{t.inbox}</span>}
         {task.needs_answer && <span className="dot-badge">?</span>}
         {task.priority > 0 && !isDone && <span className={`prio-dot p${task.priority}`} />}
       </>
     );
     const isNote = task.kind === 'note';
+    const received = receivedIds.has(task.id);
     let actions;
-    if (task.archived_at)
+    if (received && (isDone || isNote))
+      actions = [
+        ...(isDone ? [{ key: 'reopen', label: t.reopen, tone: 'neutral', onClick: () => reopen(task) }] : []),
+        { key: 'leave', label: t.leaveTask, tone: 'danger', onClick: () => leaveTask(task.id) },
+      ];
+    else if (task.archived_at)
       actions = [
         { key: 'restore', label: t.restore, tone: 'neutral', onClick: () => restore(task.id) },
         { key: 'delete', label: t.delete, tone: 'danger', onClick: () => setConfirmDel(task.id) },
@@ -740,18 +880,20 @@ export default function TaskApp() {
       onOpen: () => openView({ type: 'task', id: task.id }),
       onDate: isNote ? null : () => setDateFor(task.id),
       note: isNote,
+      shared: received || sharingIds.has(task.id),
     };
   }
 
   if (session === undefined) return <div className="splash" />;
-  if (!session) return <Login t={t} onToggleLang={toggleLang} />;
+  if (!session) return <Login t={t} lang={lang} onLang={setLanguage} invite={invite} />;
 
   const chips = [
     ['all', t.all],
     ['today', `${t.fToday}${counts.today ? ` ${counts.today}` : ''}`],
     ['overdue', `${t.fOverdue}${counts.overdue ? ` ${counts.overdue}` : ''}`],
     ['inbox', `${t.fInbox}${counts.inbox ? ` ${counts.inbox}` : ''}`],
-    ['notes', `📝 ${t.notes}`],
+    ['notes', t.notes],
+    ...(receivedIds.size || sharingIds.size ? [['shared', t.fShared]] : []),
     ['done', t.fDone],
     ['archived', t.fArchived],
     ...usedCategories.map((c) => [`cat:${c}`, c]),
@@ -791,6 +933,13 @@ export default function TaskApp() {
         onArchive={archive}
         onRestore={restore}
         onDelete={(id) => setConfirmDel(id)}
+        uploadFile={uploadFile}
+        userId={userId}
+        received={receivedIds.has(detailTask.id)}
+        onLeave={leaveTask}
+        onSharesChanged={loadShares}
+        onSaveContact={(subject, fact) => setMemoryOpen({ subject, fact })}
+        onToast={showToast}
       />
     );
 
@@ -867,11 +1016,11 @@ export default function TaskApp() {
         {text.trim() && (
           <div className="capture-choices">
             <button type="button" className="choice primary-soft" onClick={addAsTask}>
-              <span aria-hidden="true">✓</span> {t.addTask}
+              <Icon name="check" size={20} strokeWidth={2.2} /> {t.addTask}
               {ai?.hasKey && <small>{t.aiOrganizes}</small>}
             </button>
             <button type="button" className="choice" onClick={addAsNote}>
-              <span aria-hidden="true">📝</span> {t.addNote}
+              <Icon name="note" size={20} /> {t.addNote}
               <small>{t.keepAsWritten}</small>
             </button>
           </div>
@@ -903,7 +1052,7 @@ export default function TaskApp() {
             <li className={`wa-row pinned${view?.type === 'assistant' ? ' selected' : ''}`}>
               <button type="button" className="wa-front as-button" onClick={() => openView({ type: 'assistant' })}>
                 <span className="avatar ai" aria-hidden="true">
-                  ✦
+                  <Icon name="sparkle" size={24} />
                 </span>
                 <span className="wa-main">
                   <span className="wa-line">
@@ -931,8 +1080,9 @@ export default function TaskApp() {
         {filter === 'all' && open.length > 0 && open.length < 4 && <p className="hint">{t.swipeHint}</p>}
 
         <button type="button" className="fab" aria-label={t.assistant} onClick={() => openView({ type: 'assistant' })}>
-          ✦
+          <Icon name="sparkle" size={26} />
         </button>
+        {toast && <div className="toast">{toast}</div>}
       </section>
 
       <section className="detail-pane">
@@ -975,7 +1125,7 @@ export default function TaskApp() {
         />
       )}
 
-      {memoryOpen && <MemorySheet t={t} onClose={() => setMemoryOpen(false)} />}
+      {memoryOpen && <MemorySheet t={t} initial={typeof memoryOpen === 'object' ? memoryOpen : null} onClose={() => setMemoryOpen(false)} />}
 
       {justDone && !celebrate && (
         <Sheet onClose={() => setJustDone(null)}>
@@ -983,7 +1133,7 @@ export default function TaskApp() {
           <button type="button" className="sheet-btn" onClick={() => { archive(justDone); setJustDone(null); }}>
             {t.archive}
           </button>
-          <button type="button" className="sheet-btn danger" onClick={() => { setConfirmDel(justDone); setJustDone(null); }}>
+          <button type="button" className="sheet-btn danger" onClick={() => { reallyDelete(justDone); setJustDone(null); }}>
             {t.delete}
           </button>
           <button type="button" className="sheet-btn quiet" onClick={() => setJustDone(null)}>
@@ -1016,7 +1166,9 @@ export default function TaskApp() {
           onAlerts={setAlertsOn}
           ai={ai}
           onAIChange={updateAi}
-          onToggleLang={toggleLang}
+          onLang={setLanguage}
+          displayName={displayName}
+          onName={saveDisplayName}
           onSignOut={signOut}
           onOpenMemory={() => {
             setSettingsOpen(false);

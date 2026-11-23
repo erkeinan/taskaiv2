@@ -4,19 +4,22 @@ import { useState } from 'react';
 import { callAI } from '@/lib/ai';
 import { VOICE_LANGUAGES } from '@/lib/prefs';
 import Sheet from './Sheet';
+import Icon from './Icon';
+import { LANGS } from '@/lib/i18n';
 
 const NAMES = { openai: 'OpenAI', gemini: 'Gemini', claude: 'Claude' };
 
 function langName(code, uiLang) {
   try {
-    return new Intl.DisplayNames([uiLang === 'he' ? 'he' : 'en'], { type: 'language' }).of(code);
+    return new Intl.DisplayNames([uiLang], { type: 'language' }).of(code);
   } catch {
     return code;
   }
 }
 
 // All settings from the old app, plus the AI connection.
-export default function SettingsSheet({ t, lang, prefs, onPrefs, ai, onAIChange, onToggleLang, onTryCelebration, alerts, onAlerts, onSignOut, onOpenMemory, onClose }) {
+export default function SettingsSheet({ t, lang, prefs, onPrefs, ai, onAIChange, onLang, onTryCelebration, alerts, onAlerts, onSignOut, onOpenMemory, displayName, onName, onClose }) {
+  const [name, setName] = useState(displayName || '');
   const [provider, setProvider] = useState(ai?.provider || 'openai');
   const [model, setModel] = useState(ai?.provider ? ai.model || '' : '');
   const [apiKey, setApiKey] = useState('');
@@ -69,9 +72,16 @@ export default function SettingsSheet({ t, lang, prefs, onPrefs, ai, onAIChange,
 
       <section className="settings-block">
         <h3>{t.appearance}</h3>
-        <button type="button" className="sheet-btn" onClick={onToggleLang}>
-          🌐 {t.language}
-        </button>
+        <div className="field">
+          <span>{t.languageLabel}</span>
+          <div className="lang-pick" role="radiogroup" aria-label={t.languageLabel}>
+            {LANGS.map(([code, label]) => (
+              <button key={code} type="button" role="radio" aria-checked={lang === code} className={lang === code ? 'on' : ''} onClick={() => onLang(code)}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
         <label className="field">
           <span>{t.theme}</span>
           <select value={prefs.theme} onChange={(e) => set({ theme: e.target.value })}>
@@ -160,7 +170,7 @@ export default function SettingsSheet({ t, lang, prefs, onPrefs, ai, onAIChange,
       </section>
 
       <section className="settings-block">
-        <h3>🧠 {t.memoryTitle}</h3>
+        <h3 className="inline-ico"><Icon name="brain" size={18} /> {t.memoryTitle}</h3>
         <p className="status-line">{t.memoryHelp}</p>
         <button type="button" className="sheet-btn" onClick={onOpenMemory}>
           {t.memOpen}
@@ -241,6 +251,11 @@ export default function SettingsSheet({ t, lang, prefs, onPrefs, ai, onAIChange,
 
       <section className="settings-block">
         <h3>{t.account}</h3>
+        <label className="field">
+          <span>{t.yourName}</span>
+          <input value={name} maxLength={60} onChange={(e) => setName(e.target.value)} onBlur={() => name !== (displayName || '') && onName(name)} />
+        </label>
+        <p className="status-line">{t.yourNameHelp}</p>
         <button type="button" className="sheet-btn" onClick={onSignOut}>
           {t.signOut}
         </button>

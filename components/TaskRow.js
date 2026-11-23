@@ -2,6 +2,8 @@
 
 import { useRef, useState } from 'react';
 import { textDir } from '@/lib/i18n';
+import { haptic } from '@/lib/haptics';
+import Icon from './Icon';
 
 const OPEN_WIDTH = 168;
 const THRESHOLD = 64;
@@ -16,16 +18,18 @@ function avatarFor(task) {
 
 // A WhatsApp-style row: avatar, title, one-line preview, date on the right.
 // Swipe in the reading direction for Done / Remind. Tap the date to change it.
-export default function TaskRow({ task, uiDir, done, selected, actions, onOpen, onDate, dateLabel, dateTone, subtitle, badges, note }) {
+export default function TaskRow({ task, uiDir, done, selected, actions, onOpen, onDate, dateLabel, dateTone, subtitle, badges, note, shared }) {
   const [drag, setDrag] = useState(0);
   const [revealed, setRevealed] = useState(false);
   const gesture = useRef(null);
+  const crossed = useRef(false);
   const sign = uiDir === 'rtl' ? -1 : 1;
   const av = avatarFor(task);
 
   function onPointerDown(e) {
     if (e.target.closest('button')) return;
     gesture.current = { x: e.clientX, y: e.clientY, active: false, moved: false, base: revealed ? OPEN_WIDTH : 0 };
+    crossed.current = revealed;
   }
   function onPointerMove(e) {
     const g = gesture.current;
@@ -38,7 +42,14 @@ export default function TaskRow({ task, uiDir, done, selected, actions, onOpen, 
       g.active = true;
       e.currentTarget.setPointerCapture?.(e.pointerId);
     }
-    setDrag(Math.max(0, Math.min(OPEN_WIDTH + 24, g.base + mx)));
+    const next = Math.max(0, Math.min(OPEN_WIDTH + 24, g.base + mx));
+    // a light tick when the swipe passes the point where the actions stay open
+    const over = next > THRESHOLD;
+    if (over !== crossed.current) {
+      crossed.current = over;
+      if (over) haptic('tick');
+    }
+    setDrag(next);
   }
   function onPointerUp() {
     const g = gesture.current;
@@ -84,16 +95,21 @@ export default function TaskRow({ task, uiDir, done, selected, actions, onOpen, 
         }}
       >
         <span className={`avatar${note ? ' note' : ''}`} style={note ? undefined : { background: done ? 'var(--muted)' : av.color }} aria-hidden="true">
-          {note ? '📝' : done ? '✓' : av.letter}
+          {note ? <Icon name="note" size={24} /> : done ? <Icon name="check" size={24} strokeWidth={2.4} /> : av.letter}
         </span>
         <div className="wa-main">
           <div className="wa-line">
+            {shared && (
+              <span className="shared-badge" title="shared">
+                <Icon name="users" size={15} />
+              </span>
+            )}
             <span className="wa-title" dir={textDir(task.title)}>
               {task.title}
             </span>
             {onDate ? (
               <button type="button" className={`wa-date ${dateTone || ''}`} onClick={onDate}>
-                {dateLabel || '📅'}
+                {dateLabel || <Icon name="calendar" size={17} />}
               </button>
             ) : (
               dateLabel && <span className={`wa-date ${dateTone || ''}`}>{dateLabel}</span>

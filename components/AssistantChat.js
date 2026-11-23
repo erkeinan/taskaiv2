@@ -2,11 +2,12 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { getSupabase } from '@/lib/supabase';
-import { textDir } from '@/lib/i18n';
+import { textDir, localeOf } from '@/lib/i18n';
 import { callAI, localNow, timeZone } from '@/lib/ai';
 import { prepareFile } from '@/lib/media';
 import { dueLabel, partsToDue } from '@/lib/dates';
 import { useRecorder, blobToBase64, clock } from '@/lib/voice';
+import Icon from './Icon';
 
 const CHAT_CACHE = 'taskai.chat';
 
@@ -56,6 +57,7 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
   const inputRef = useRef(null);
   const voice = useRecorder();
   const [hearing, setHearing] = useState(false);
+  const [editing, setEditing] = useState(null); // the user's own message being corrected
 
   // load the recent conversation once
   useEffect(() => {
@@ -134,6 +136,34 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
     }
   }
 
+  // Correct a message already sent: the bubble changes, and the assistant fixes what it saved from it.
+  async function sendEdit() {
+    const msg = editing;
+    const next = text.trim();
+    setEditing(null);
+    setText('');
+    if (!msg || !next || next === msg.content || busy) return;
+    setMessages((prev) => {
+      const list = prev.map((m) => (m.id === msg.id ? { ...m, content: next, meta: { ...m.meta, edited: true } } : m));
+      writeCache(list);
+      return list;
+    });
+    getSupabase().from('chat_messages').update({ content: next.slice(0, 24000), meta: { ...(msg.meta || {}), edited: true } }).eq('id', msg.id).then(() => {});
+    setBusy(true);
+    try {
+      const note = `[I edited my earlier message. Before: "${msg.content}". Now: "${next}". Update or fix whatever you saved from it; do not create a duplicate.]`;
+      const reply = await callAI({ action: 'chat', capture: buildCapture(note, null), lang });
+      const saved = await applyActions(reply.actions || []);
+      const botMsg = { id: crypto.randomUUID(), role: 'assistant', content: reply.message || (saved.length ? t.updated : '…'), meta: { question: reply.question || null, saved }, created_at: new Date().toISOString() };
+      push(botMsg);
+      await getSupabase().from('chat_messages').insert({ id: botMsg.id, role: 'assistant', content: botMsg.content.slice(0, 24000), meta: botMsg.meta });
+    } catch (e) {
+      setError(e.message || t.error);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function send(raw, { answer, attachment: att, mode, voice: isVoice } = {}) {
     const shown = (raw || '').trim();
     const a = att ?? attachment;
@@ -161,7 +191,7 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
     setBusy(true);
     try {
       const forAI = answer && answer !== shown ? `${shown} [${answer}]` : shown;
-      const reply = await callAI({ action: 'chat', capture: buildCapture(forAI, a), ...(mode ? { mode } : {}), ...(isVoice ? { voice: true } : {}) });
+      const reply = await callAI({ action: 'chat', capture: buildCapture(forAI, a), lang, ...(mode ? { mode } : {}), ...(isVoice ? { voice: true } : {}) });
       const saved = await applyActions(reply.actions || []);
       const botMsg = {
         id: crypto.randomUUID(),
@@ -219,7 +249,7 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
     if (ids.length) await getSupabase().from('chat_messages').delete().in('id', ids);
   }
 
-  const fmtTime = new Intl.DateTimeFormat(lang === 'he' ? 'he-IL' : 'en-GB', { hour: '2-digit', minute: '2-digit' });
+  const fmtTime = new Intl.DateTimeFormat(localeOf(lang), { hour: '2-digit', minute: '2-digit' });
   const last = messages.at(-1);
   const question = !busy && last?.role === 'assistant' ? last.meta?.question : null;
 
@@ -234,7 +264,7 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
           </button>
         )}
         <span className="avatar ai" aria-hidden="true">
-          ✦
+          <Icon name="sparkle" size={22} />
         </span>
         <div className="convo-title">
           <strong>{t.assistant}</strong>
@@ -268,14 +298,39 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
           </div>
         )}
         {messages.map((m) => (
-          <div key={m.id} className={`bubble ${m.role === 'user' ? 'out' : 'in'}`}>
+          <div
+            key={m.id}
+            className={`bubble ${m.role === 'user' ? 'out' : 'in'}${m.role === 'user' && m.content && !m.meta?.pending && !m.meta?.voice ? ' mine' : ''}`}
+            title={m.role === 'user' ? t.edit : undefined}
+            onClick={
+              m.role === 'user' && m.content && !m.meta?.pending && !m.meta?.voice && !busy
+                ? () => {
+                    setEditing(m);
+                    setText(m.content);
+                    setTimeout(() => inputRef.current?.focus(), 0);
+                  }
+                : undefined
+            }
+          >
             {m.previewUrl && (
               // eslint-disable-next-line @next/next/no-img-element
               <img className="bubble-img" src={m.previewUrl} alt="" />
             )}
-            {!m.previewUrl && m.meta?.attachment && <span className="bubble-file">📎 {m.meta.attachment.name}</span>}
-            {m.meta?.voice && <span className="bubble-voice">🎤 {t.voiceMessage}</span>}
-            {m.meta?.mode === 'note' && <span className="bubble-voice">📝 {t.note}</span>}
+            {!m.previewUrl && m.meta?.attachment && (
+              <span className="bubble-file inline-ico">
+                <Icon name="clip" size={14} /> {m.meta.attachment.name}
+              </span>
+            )}
+            {m.meta?.voice && (
+              <span className="bubble-voice inline-ico">
+                <Icon name="mic" size={14} /> {t.voiceMessage}
+              </span>
+            )}
+            {m.meta?.mode === 'note' && (
+              <span className="bubble-voice inline-ico">
+                <Icon name="note" size={14} /> {t.note}
+              </span>
+            )}
             {m.content && (
               <span className="bubble-text" dir={textDir(m.content)}>
                 {m.content}
@@ -290,12 +345,15 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
               <span className="saved-list">
                 {m.meta.saved.map((s) => (
                   <button key={`${s.id}-${s.kind}`} type="button" className="saved-chip" onClick={() => onOpenTask(s.id)}>
-                    {s.note ? '📝' : s.kind === 'created' ? '✓' : '↻'} {s.note ? t.noteSaved : s.kind === 'created' ? t.saved : t.updated} · <span dir={textDir(s.title)}>{s.title}</span>
+                    <Icon name={s.note ? 'note' : s.kind === 'created' ? 'check' : 'edit'} size={14} /> {s.note ? t.noteSaved : s.kind === 'created' ? t.saved : t.updated} · <span dir={textDir(s.title)}>{s.title}</span>
                   </button>
                 ))}
               </span>
             )}
-            <span className="bubble-time">{fmtTime.format(new Date(m.created_at))}</span>
+            <span className="bubble-time">
+              {m.meta?.edited && <span className="bubble-edited">{t.edited} · </span>}
+              {fmtTime.format(new Date(m.created_at))}
+            </span>
           </div>
         ))}
       {question && (question.options?.length > 0 || question.allow_date) && (
@@ -324,7 +382,9 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
         )}
         {hearing && (
           <div className="bubble out">
-            <span className="bubble-voice">🎤 {t.transcribing}</span>
+            <span className="bubble-voice inline-ico">
+              <Icon name="mic" size={14} /> {t.transcribing}
+            </span>
           </div>
         )}
         {busy && (
@@ -370,19 +430,29 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
         </div>
       )}
 
+      {editing && (
+        <div className="edit-bar">
+          <Icon name="edit" size={16} />
+          <span dir={textDir(editing.content)}>
+            {t.editing}: {editing.content}
+          </span>
+          <button type="button" className="icon-btn" aria-label={t.cancel} onClick={() => { setEditing(null); setText(''); }}>
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+      )}
       <form
         className="composer"
         onSubmit={(e) => {
           e.preventDefault();
-          send(text);
+          if (editing) sendEdit();
+          else send(text);
         }}
       >
         {voice.recording ? (
           <div className="composer-box recording">
             <button type="button" className="icon-in" aria-label={t.cancel} onClick={voice.cancel}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M6 7h12M9 7V5h6v2M8 7l1 12h6l1-12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
+              <Icon name="trash" size={21} />
             </button>
             <span className="rec-dot" aria-hidden="true" />
             <span className="rec-time">{clock(voice.seconds)}</span>
@@ -391,9 +461,7 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
         ) : (
           <div className="composer-box">
             <button type="button" className="icon-in" aria-label={t.attach} title={t.attach} onClick={() => fileRef.current?.click()}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              </svg>
+              <Icon name="plus" size={23} strokeWidth={2} />
             </button>
             <input
               ref={inputRef}
@@ -417,31 +485,21 @@ export default function AssistantChat({ t, lang, ai, pending, onPendingUsed, app
               enterKeyHint="send"
             />
             <button type="button" className="icon-in" aria-label={t.camera} onClick={() => cameraRef.current?.click()}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 8h3l2-2.5h6L17 8h3v11H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-                <circle cx="12" cy="13" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-              </svg>
+              <Icon name="camera" size={22} />
             </button>
           </div>
         )}
         {voice.recording ? (
           <button type="button" className="send" aria-label={t.send} onClick={finishVoice}>
-            <svg viewBox="0 0 24 24" aria-hidden="true" className="flip-rtl">
-              <path d="M4 12l16-8-6 16-2.5-6.5z" fill="currentColor" />
-            </svg>
+            <Icon name="send" size={21} className="flip-rtl" />
           </button>
         ) : !text.trim() && !attachment ? (
           <button type="button" className="send" aria-label={t.recordVoice} title={t.recordVoice} disabled={busy || hearing} onClick={startVoice}>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor" />
-              <path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-            </svg>
+            <Icon name="mic" size={22} strokeWidth={2} />
           </button>
         ) : (
           <button type="submit" className="send" aria-label={t.send} disabled={busy}>
-            <svg viewBox="0 0 24 24" aria-hidden="true" className="flip-rtl">
-              <path d="M4 12l16-8-6 16-2.5-6.5z" fill="currentColor" />
-            </svg>
+            <Icon name="send" size={21} className="flip-rtl" />
           </button>
         )}
         <input ref={fileRef} type="file" accept="image/*,application/pdf,text/plain,.txt,.md,.csv" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) attach(f, 'screenshot'); }} />

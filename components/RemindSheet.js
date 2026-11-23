@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import Sheet from './Sheet';
+import { localeOf } from '@/lib/i18n';
 
 const pad = (n) => String(n).padStart(2, '0');
 const toLocalInput = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -23,8 +24,8 @@ function nextWeekday(day, hour) {
 export default function RemindSheet({ t, lang, current, onPick, onClear, onClose }) {
   const [custom, setCustom] = useState(false);
   const [value, setValue] = useState(() => toLocalInput(current ? new Date(current) : at(0, new Date().getHours() + 1)));
-  const fmt = new Intl.DateTimeFormat(lang === 'he' ? 'he-IL' : 'en-GB', { hour: '2-digit', minute: '2-digit' });
-  const fmtFull = new Intl.DateTimeFormat(lang === 'he' ? 'he-IL' : 'en-GB', { weekday: 'long', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const fmt = new Intl.DateTimeFormat(localeOf(lang), { hour: '2-digit', minute: '2-digit' });
+  const fmtFull = new Intl.DateTimeFormat(localeOf(lang), { weekday: 'long', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const eight = fmt.format(at(0, 8));
   const in20 = new Date(Date.now() + 20 * 60000);
   const in2h = new Date(Date.now() + 2 * 3600000);

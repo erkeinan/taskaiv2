@@ -2,15 +2,17 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { getSupabase } from '@/lib/supabase';
-import { textDir } from '@/lib/i18n';
+import { textDir, localeOf } from '@/lib/i18n';
 import { dueLabel } from '@/lib/dates';
 import { normalizeRule, repeatLabel, weekdayName } from '@/lib/recurrence';
 import Sheet from './Sheet';
 import DateSheet from './DateSheet';
 import RemindSheet from './RemindSheet';
+import Icon from './Icon';
+import { prepareFile } from '@/lib/media';
 
 // Full-screen task page: everything about one task. The phone's back button closes it.
-export default function TaskPage({ t, lang, task, categories, people, now, onClose, patchTask, onOrganize, onDone, onArchive, onDelete, onRestore }) {
+export default function TaskPage({ t, lang, task, categories, people, now, onClose, patchTask, onOrganize, onDone, onArchive, onDelete, onRestore, uploadFile, userId, received, onLeave, onSharesChanged, onSaveContact, onToast }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [edit, setEdit] = useState(null);
   const isNote = task.kind === 'note';
@@ -26,11 +28,18 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
   const [category, setCategory] = useState(task.category || '');
   const [assignee, setAssignee] = useState(task.assignee_name || '');
   const loadedDescription = useRef('');
+  const [members, setMembers] = useState([]); // [{ user_id, name, is_owner }]
+  const [shareLink, setShareLink] = useState('');
+  const [editUpdate, setEditUpdate] = useState(null); // { id, body }
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef(null);
+  const nameOf = (id) => (id === userId ? t.you : members.find((m) => m.user_id === id)?.name || '');
+  const isShared = members.length > 1;
 
   const rule = normalizeRule(task.recurrence);
   const remindOn = task.snoozed_until && Date.parse(task.snoozed_until) > now;
   const late = task.status !== 'done' && task.due_at && Date.parse(task.due_at) < now;
-  const fmt = new Intl.DateTimeFormat(lang === 'he' ? 'he-IL' : 'en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const fmt = new Intl.DateTimeFormat(localeOf(lang), { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
   // One small read per section, only when the page opens.
   useEffect(() => {
@@ -62,19 +71,54 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
       .then(({ data }) => live && setFiles(data || []));
     supabase
       .from('comments')
-      .select('id,kind,body,created_at')
+      .select('id,kind,body,created_at,updated_at,author_id')
       .eq('task_id', task.id)
       .is('deleted_at', null)
       .order('created_at')
       .limit(200)
       .then(({ data }) => live && setUpdates(data || []));
+    supabase.rpc('task_people', { p_task: task.id }).then(({ data }) => live && setMembers(data || []));
+    // live: the other people on a shared task see each other's steps and updates at once
+    const channel = supabase
+      .channel(`task-${task.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'comments', filter: `task_id=eq.${task.id}` }, (p) => {
+        const row = p.new;
+        if (!row?.id) return;
+        setUpdates((prev) => {
+          if (row.deleted_at) return prev.filter((u) => u.id !== row.id);
+          const i = prev.findIndex((u) => u.id === row.id);
+          if (i === -1) return [...prev, row];
+          const next = prev.slice();
+          next[i] = { ...prev[i], ...row };
+          return next;
+        });
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'task_steps', filter: `task_id=eq.${task.id}` }, (p) => {
+        const row = p.new;
+        if (!row?.id) return;
+        setSteps((prev) => {
+          if (row.deleted_at) return prev.filter((x) => x.id !== row.id);
+          const i = prev.findIndex((x) => x.id === row.id);
+          const slim = { id: row.id, title: row.title, done: row.done, position: row.position };
+          if (i === -1) return [...prev, slim].sort((a, b) => a.position - b.position);
+          const next = prev.slice();
+          next[i] = slim;
+          return next;
+        });
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'files', filter: `task_id=eq.${task.id}` }, (p) => {
+        const row = p.new;
+        if (row?.id) setFiles((prev) => (prev.some((f) => f.id === row.id) ? prev : [...prev, row]));
+      })
+      .subscribe();
     return () => {
       live = false;
+      supabase.removeChannel(channel);
     };
   }, [task.id]);
 
   async function logEvent(body) {
-    const row = { id: crypto.randomUUID(), task_id: task.id, kind: 'event', body: body.slice(0, 4000), created_at: new Date().toISOString() };
+    const row = { id: crypto.randomUUID(), task_id: task.id, kind: 'event', body: body.slice(0, 4000), created_at: new Date().toISOString(), author_id: userId };
     setUpdates((prev) => [...prev, row]);
     await getSupabase().from('comments').insert({ id: row.id, task_id: row.task_id, kind: 'event', body: row.body });
   }
@@ -82,11 +126,90 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
   async function addUpdate() {
     const body = newUpdate.trim();
     if (!body) return;
-    const row = { id: crypto.randomUUID(), task_id: task.id, kind: 'update', body: body.slice(0, 4000), created_at: new Date().toISOString() };
+    const row = { id: crypto.randomUUID(), task_id: task.id, kind: 'update', body: body.slice(0, 4000), created_at: new Date().toISOString(), author_id: userId };
     setUpdates((prev) => [...prev, row]);
     setNewUpdate('');
     const { error } = await getSupabase().from('comments').insert({ id: row.id, task_id: row.task_id, kind: 'update', body: row.body });
     if (error) setUpdates((prev) => prev.filter((u) => u.id !== row.id));
+  }
+
+  async function saveEditedUpdate() {
+    const e = editUpdate;
+    setEditUpdate(null);
+    const body = e.body.trim().slice(0, 4000);
+    if (!body) return;
+    const at = new Date().toISOString();
+    setUpdates((prev) => prev.map((u) => (u.id === e.id ? { ...u, body, updated_at: at } : u)));
+    await getSupabase().from('comments').update({ body }).eq('id', e.id);
+  }
+  async function deleteUpdate(id) {
+    setEditUpdate(null);
+    setUpdates((prev) => prev.filter((u) => u.id !== id));
+    await getSupabase().from('comments').update({ deleted_at: new Date().toISOString() }).eq('id', id);
+  }
+
+  // files: any picture or document, saved with this task or note
+  async function addFile(file) {
+    if (!file) return;
+    if (file.size > 20 * 1024 * 1024) {
+      onToast?.('Max 20 MB');
+      return;
+    }
+    setUploading(true);
+    try {
+      let att;
+      try {
+        att = await prepareFile(file, 'document');
+      } catch {
+        att = { name: file.name || 'file', mime: file.type || 'application/octet-stream', blob: file };
+      }
+      const row = await uploadFile(att, task.id);
+      setFiles((prev) => (prev.some((f) => f.id === row.id) ? prev : [...prev, row]));
+    } catch (err) {
+      onToast?.(err.message || t.error);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  // ---- sharing by link ----
+  async function openShare() {
+    setEdit('share');
+    if (shareLink) return;
+    const supabase = getSupabase();
+    const { data: mine } = await supabase.from('task_shares').select('token').eq('task_id', task.id).eq('shared_by', userId).is('recipient_id', null).eq('status', 'pending').limit(1);
+    let token = mine?.[0]?.token;
+    if (!token) {
+      const { data, error } = await supabase.from('task_shares').insert({ task_id: task.id }).select('token').single();
+      if (error) {
+        onToast?.(error.message);
+        return;
+      }
+      token = data.token;
+    }
+    setShareLink(`${window.location.origin}/?join=${token}`);
+  }
+  async function sendInvite() {
+    const text = `${task.title}\n${t.shareText}: ${shareLink}`;
+    try {
+      if (navigator.share) await navigator.share({ title: task.title, text, url: shareLink });
+      else window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
+    } catch {
+      /* cancelled */
+    }
+  }
+  async function copyInvite() {
+    try {
+      await navigator.clipboard.writeText(shareLink);
+      onToast?.(t.linkCopied);
+    } catch {
+      /* not allowed */
+    }
+  }
+  async function removePerson(uid) {
+    setMembers((prev) => prev.filter((m) => m.user_id !== uid));
+    await getSupabase().from('task_shares').update({ status: 'revoked' }).eq('task_id', task.id).eq('recipient_id', uid);
+    onSharesChanged?.();
   }
 
   function eventText(body) {
@@ -111,6 +234,12 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
         return `${t.ev_assign} ${arg}`;
       case 'category':
         return `${t.ev_category} ${arg}`;
+      case 'due':
+        return `${t.due}: ${arg ? dueLabel(arg.split('|')[0], arg.split('|')[1] === '1', lang) : t.noDate}`;
+      case 'priority':
+        return `${t.priority}: ${[t.pNone, t.pLow, t.pMedium, t.pHigh][Number(arg)] || arg}`;
+      case 'step':
+        return `✓ ${arg}`;
       default:
         return body;
     }
@@ -171,6 +300,7 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
   async function toggleStep(step) {
     const doneNow = !step.done;
     setSteps((prev) => prev.map((s) => (s.id === step.id ? { ...s, done: doneNow } : s)));
+    if (doneNow && isShared) logEvent(`step:${step.title}`);
     await getSupabase()
       .from('task_steps')
       .update({ done: doneNow, completed_at: doneNow ? new Date().toISOString() : null })
@@ -229,7 +359,7 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
     seenUpdates.current = updates.length;
   }, [updates.length]);
 
-  const subtitle = [isNote ? `📝 ${t.note}` : null, task.category, task.due_at ? dueLabel(task.due_at, task.due_has_time, lang) : null, rule ? `🔁 ${repeatLabel(rule, lang)}` : null]
+  const subtitle = [isNote ? t.note : null, isShared ? `${t.shared} · ${members.map((m) => (m.user_id === userId ? t.you : m.name)).join(', ')}` : null, task.category, task.due_at ? dueLabel(task.due_at, task.due_has_time, lang) : null, rule ? repeatLabel(rule, lang) : null]
     .filter(Boolean)
     .join(' · ');
 
@@ -237,30 +367,26 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
     <div className="convo">
       <header className="convo-bar">
         <button type="button" className="icon-top" aria-label={t.back} onClick={close}>
-          <svg viewBox="0 0 24 24" aria-hidden="true" className="flip-rtl">
-            <path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+          <Icon name="back" size={24} className="flip-rtl" strokeWidth={2} />
         </button>
         <div className="convo-title">
           <strong dir={textDir(task.title)}>{task.title}</strong>
           <small>{subtitle || t.taskInfo}</small>
         </div>
-        <button type="button" className="icon-top" aria-label={t.share} onClick={share}>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 15V4M7.5 8.5L12 4l4.5 4.5M5 13v6h14v-6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+        <button type="button" className="icon-top" aria-label={t.shareTitle} title={t.shareTitle} onClick={openShare}>
+          <Icon name={isShared ? 'users' : 'share'} size={23} />
         </button>
         <div className="menu-wrap">
           <button type="button" className="icon-top" aria-label={t.moreActions} onClick={() => setMenuOpen((v) => !v)}>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <circle cx="12" cy="5" r="1.8" fill="currentColor" />
-              <circle cx="12" cy="12" r="1.8" fill="currentColor" />
-              <circle cx="12" cy="19" r="1.8" fill="currentColor" />
-            </svg>
+            <Icon name="more" size={23} />
           </button>
           {menuOpen && (
             <div className="menu" role="menu">
-              {task.archived_at ? (
+              {received ? (
+                <button type="button" role="menuitem" className="danger" onClick={() => { setMenuOpen(false); saveTexts(); onLeave(task.id); }}>
+                  {t.leaveTask}
+                </button>
+              ) : task.archived_at ? (
                 <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); onRestore(task.id); }}>
                   {t.restore}
                 </button>
@@ -272,9 +398,17 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
               <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); saveTexts(); patchTask(task.id, isNote ? { kind: 'single', status: 'open' } : { kind: 'note' }); }}>
                 {isNote ? t.makeTask : t.makeNote}
               </button>
-              <button type="button" role="menuitem" className="danger" onClick={() => { setMenuOpen(false); onDelete(task.id); }}>
-                {t.delete}
+              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); share(); }}>
+                {t.sendAsText}
               </button>
+              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); onSaveContact?.(task.assignee_name || '', [task.assignee_name, description.match(/[+\d][\d\s()-]{6,}\d/)?.[0], description.match(/\S+@\S+\.\S+/)?.[0]].filter(Boolean).join(' · ')); }}>
+                {t.saveToKnowledge}
+              </button>
+              {!received && (
+                <button type="button" role="menuitem" className="danger" onClick={() => { setMenuOpen(false); onDelete(task.id); }}>
+                  {t.delete}
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -295,39 +429,39 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
           <div className="prop-chips">
             {!isNote && (
               <button type="button" className={`prop status-${task.status}`} onClick={() => setEdit('status')}>
-                <span aria-hidden="true">{task.status === 'done' ? '✓' : task.status === 'in_progress' ? '◐' : '○'}</span>
+                <Icon name={task.status === 'done' ? 'check' : task.status === 'in_progress' ? 'half' : 'circle'} size={15} strokeWidth={2.2} />
                 {task.status === 'done' ? t.done : task.status === 'in_progress' ? t.inProgress : t.open}
               </button>
             )}
             {!isNote && (
               <button type="button" className={`prop${task.due_at ? ' set' : ''}${late ? ' late' : ''}`} onClick={() => setEdit('date')}>
-                <span aria-hidden="true">📅</span>
+                <Icon name="calendar" size={16} />
                 {task.due_at ? dueLabel(task.due_at, task.due_has_time, lang) : t.dates}
               </button>
             )}
             <button type="button" className={`prop${remindOn ? ' set' : ''}`} onClick={() => setEdit('remind')}>
-              <span aria-hidden="true">⏰</span>
+              <Icon name="bell" size={16} />
               {remindOn ? fmt.format(new Date(task.snoozed_until)) : t.remind}
             </button>
             {!isNote && (
               <button type="button" className={`prop${rule ? ' set' : ''}`} onClick={() => setEdit('repeat')}>
-                <span aria-hidden="true">🔁</span>
+                <Icon name="repeat" size={16} />
                 {rule ? repeatLabel(rule, lang) : t.repeat}
               </button>
             )}
             <button type="button" className={`prop${task.category ? ' set' : ''}`} onClick={() => setEdit('category')}>
-              <span aria-hidden="true">🏷</span>
+              <Icon name="tag" size={16} />
               <span dir={textDir(task.category || '')}>{task.category || t.category}</span>
             </button>
             {!isNote && (
               <button type="button" className={`prop${task.assignee_name ? ' set' : ''}`} onClick={() => setEdit('assignee')}>
-                <span aria-hidden="true">👤</span>
+                <Icon name="user" size={16} />
                 <span dir={textDir(task.assignee_name || '')}>{task.assignee_name || t.assignee}</span>
               </button>
             )}
             {!isNote && (
               <button type="button" className={`prop${task.priority ? ` set prio${task.priority}` : ''}`} onClick={() => setEdit('priority')}>
-                <span aria-hidden="true" className="flag">⚑</span>
+                <Icon name="flag" size={16} />
                 {task.priority ? [t.pNone, t.pLow, t.pMedium, t.pHigh][task.priority] : t.priority}
               </button>
             )}
@@ -335,10 +469,9 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
 
           <AutoText className="desc" value={description} onChange={setDescription} onBlur={saveTexts} maxLength={10000} label={t.description} placeholder={isNote ? t.notePh : t.descriptionPh} />
 
-          {(!isNote || steps.length > 0) && (
-            <div className="field">
-              <span>
-                {task.kind === 'stages' ? t.steps : t.items} {steps.length > 0 && `· ${doneCount}/${steps.length}`}
+          <div className="field">
+              <span className="inline-ico">
+                <Icon name="checklist" size={15} /> {task.kind === 'stages' ? t.steps : t.items} {steps.length > 0 && `· ${doneCount}/${steps.length}`}
               </span>
               <ul className={`step-list ${task.kind}`}>
                 {steps.map((s, i) => (
@@ -360,30 +493,39 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
                   addStep();
                 }}
               >
-                <input value={newStep} dir={textDir(newStep)} onChange={(e) => setNewStep(e.target.value)} placeholder={t.addStep} maxLength={500} aria-label={t.addStep} />
+                <input value={newStep} dir={textDir(newStep)} onChange={(e) => setNewStep(e.target.value)} placeholder={isNote ? t.addItem : t.addStep} maxLength={500} aria-label={t.addStep} />
               </form>
-            </div>
-          )}
+          </div>
 
-          {files.length > 0 && (
-            <div className="field">
-              <span>{t.files}</span>
+          <div className="field">
+            <span className="inline-ico">
+              <Icon name="clip" size={15} /> {t.files}
+            </span>
+            {files.length > 0 && (
               <ul className="file-list">
                 {files.map((f) => (
                   <li key={f.id}>
-                    <span>📎 {f.name}</span>
+                    <span>
+                      <Icon name={f.mime?.startsWith('image/') ? 'image' : 'file'} size={16} /> {f.name}
+                    </span>
                     <button type="button" className="link-button" onClick={() => openFile(f)}>
                       {t.openFile}
                     </button>
                   </li>
                 ))}
               </ul>
+            )}
+            <div>
+              <button type="button" className="file-add" disabled={uploading} onClick={() => fileRef.current?.click()}>
+                <Icon name="plus" size={16} /> {uploading ? t.uploading : t.addFile}
+              </button>
+              <input ref={fileRef} type="file" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; addFile(f); }} />
             </div>
-          )}
+          </div>
 
           {task.status === 'inbox' && (
             <button type="button" className="primary wide" onClick={() => { saveTexts(); onOrganize(task, { source_text: sourceText }); }}>
-              ✦ {t.organizeAI}
+              {t.organizeAI}
             </button>
           )}
         </section>
@@ -397,20 +539,36 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
           </div>
         )}
 
-        {updates.map((u) =>
-          u.kind === 'event' ? (
-            <div key={u.id} className="sys-pill" dir={textDir(eventText(u.body))}>
-              {eventText(u.body)} · {fmt.format(new Date(u.created_at))}
-            </div>
-          ) : (
-            <div key={u.id} className="bubble out">
+        {updates.map((u) => {
+          const mine = !u.author_id || u.author_id === userId;
+          const who = isShared ? nameOf(u.author_id) : '';
+          if (u.kind === 'event')
+            return (
+              <div key={u.id} className="sys-pill" dir={textDir(eventText(u.body))}>
+                {who && !mine ? `${who}: ` : ''}
+                {eventText(u.body)} · {fmt.format(new Date(u.created_at))}
+              </div>
+            );
+          const edited = u.updated_at && Date.parse(u.updated_at) - Date.parse(u.created_at) > 2000;
+          return (
+            <div
+              key={u.id}
+              className={`bubble ${mine ? 'out mine' : 'in'}`}
+              role={mine ? 'button' : undefined}
+              tabIndex={mine ? 0 : undefined}
+              onClick={mine ? () => setEditUpdate({ id: u.id, body: u.body }) : undefined}
+            >
+              {who && !mine && <span className="bubble-author">{who}</span>}
               <span className="bubble-text" dir={textDir(u.body)}>
                 {u.body}
               </span>
-              <span className="bubble-time">{fmt.format(new Date(u.created_at))}</span>
+              <span className="bubble-time">
+                {edited && <span className="bubble-edited">{t.edited} · </span>}
+                {fmt.format(new Date(u.created_at))}
+              </span>
             </div>
-          ),
-        )}
+          );
+        })}
       </div>
 
       <form
@@ -424,23 +582,71 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
           <input value={newUpdate} dir={textDir(newUpdate) === 'auto' ? undefined : textDir(newUpdate)} onChange={(e) => setNewUpdate(e.target.value)} placeholder={t.addUpdate} maxLength={4000} aria-label={t.addUpdate} />
         </div>
         <button type="submit" className="send" aria-label={t.send} disabled={!newUpdate.trim()}>
-          <svg viewBox="0 0 24 24" aria-hidden="true" className="flip-rtl">
-            <path d="M4 12l16-8-6 16-2.5-6.5z" fill="currentColor" />
-          </svg>
+          <Icon name="send" size={21} className="flip-rtl" />
         </button>
       </form>
+
+      {editUpdate && (
+        <Sheet onClose={() => setEditUpdate(null)}>
+          <p className="sheet-title">{t.edit}</p>
+          <textarea className="edit-area" autoFocus rows={3} value={editUpdate.body} dir={textDir(editUpdate.body)} maxLength={4000} onChange={(e) => setEditUpdate({ ...editUpdate, body: e.target.value })} />
+          <div className="sheet-row">
+            <button type="button" className="sheet-btn danger" onClick={() => deleteUpdate(editUpdate.id)}>
+              {t.delete}
+            </button>
+            <button type="button" className="sheet-btn good" disabled={!editUpdate.body.trim()} onClick={saveEditedUpdate}>
+              {t.save}
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {edit === 'share' && (
+        <Sheet onClose={() => setEdit(null)}>
+          <p className="sheet-title">{t.shareTitle}</p>
+          <p className="sheet-sub">{t.shareHelp}</p>
+          {members.length > 1 && (
+            <div className="field">
+              <span>{t.sharedWith}</span>
+              <div className="people">
+                {members.map((m) => (
+                  <span key={m.user_id} className="person-chip">
+                    <span className="mini">{[...(m.name || '?')][0].toUpperCase()}</span>
+                    <span dir={textDir(m.name)}>{m.user_id === userId ? t.you : m.name}</span>
+                    {!received && !m.is_owner && (
+                      <button type="button" aria-label={t.removePerson} onClick={() => removePerson(m.user_id)}>
+                        <Icon name="close" size={14} />
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="share-link">
+            <Icon name="link" size={16} />
+            <span>{shareLink || '…'}</span>
+          </div>
+          <button type="button" className="primary wide" disabled={!shareLink} onClick={sendInvite}>
+            {t.shareInvite}
+          </button>
+          <button type="button" className="sheet-btn" disabled={!shareLink} onClick={copyInvite}>
+            {t.copyLink}
+          </button>
+        </Sheet>
+      )}
 
       {edit === 'status' && (
         <Sheet onClose={() => setEdit(null)}>
           <p className="sheet-title">{t.status}</p>
           <div className="pick-list">
             {[
-              ['open', `○ ${t.open}`],
-              ['in_progress', `◐ ${t.inProgress}`],
-              ['done', `✓ ${t.done}`],
-            ].map(([key, label]) => (
-              <button key={key} type="button" className={task.status === key || (key === 'open' && task.status === 'inbox') ? 'on' : ''} onClick={() => { setEdit(null); setStatus(key); }}>
-                {label}
+              ['open', 'circle', t.open],
+              ['in_progress', 'half', t.inProgress],
+              ['done', 'check', t.done],
+            ].map(([key, icon, label]) => (
+              <button key={key} type="button" className={`inline-ico${task.status === key || (key === 'open' && task.status === 'inbox') ? ' on' : ''}`} onClick={() => { setEdit(null); setStatus(key); }}>
+                <Icon name={icon} size={18} /> {label}
               </button>
             ))}
           </div>
@@ -453,6 +659,7 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
           onClose={() => setEdit(null)}
           onSave={(patch) => {
             patchTask(task.id, patch);
+            if (isShared) logEvent(`due:${patch.due_at ? `${patch.due_at}|${patch.due_has_time ? 1 : 0}` : ''}`);
             setEdit(null);
           }}
         />
@@ -575,8 +782,8 @@ export default function TaskPage({ t, lang, task, categories, people, now, onClo
           <p className="sheet-title">{t.priority}</p>
           <div className="pick-list">
             {[t.pNone, t.pLow, t.pMedium, t.pHigh].map((label, i) => (
-              <button key={label} type="button" className={(task.priority || 0) === i ? 'on' : ''} onClick={() => { patchTask(task.id, { priority: i }); setEdit(null); }}>
-                <span className={`flag-dot p${i}`} aria-hidden="true">⚑</span> {label}
+              <button key={label} type="button" className={`inline-ico${(task.priority || 0) === i ? ' on' : ''}`} onClick={() => { patchTask(task.id, { priority: i }); if (isShared) logEvent(`priority:${i}`); setEdit(null); }}>
+                <span className={`flag-dot p${i}`} aria-hidden="true"><Icon name="flag" size={18} /></span> {label}
               </button>
             ))}
           </div>

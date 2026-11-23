@@ -6,11 +6,11 @@ import { textDir } from '@/lib/i18n';
 import Sheet from './Sheet';
 
 // What the assistant knows about the user: people, work, preferences. The user can add, edit and delete.
-export default function MemorySheet({ t, onClose }) {
+export default function MemorySheet({ t, initial, onClose }) {
   const [facts, setFacts] = useState(null);
-  const [editing, setEditing] = useState(null); // id | 'new'
-  const [subject, setSubject] = useState('');
-  const [fact, setFact] = useState('');
+  const [editing, setEditing] = useState(initial ? 'new' : null); // id | 'new'
+  const [subject, setSubject] = useState(initial?.subject || '');
+  const [fact, setFact] = useState(initial?.fact || '');
   const [error, setError] = useState('');
 
   useEffect(() => {

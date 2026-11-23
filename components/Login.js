@@ -2,8 +2,9 @@
 
 import { useState } from 'react';
 import { getSupabase } from '@/lib/supabase';
+import { LANGS } from '@/lib/i18n';
 
-export default function Login({ t, onToggleLang }) {
+export default function Login({ t, lang, onLang, invite }) {
   const [email, setEmail] = useState('');
   const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -25,15 +26,29 @@ export default function Login({ t, onToggleLang }) {
 
   return (
     <main className="login">
-      <button type="button" className="link-button lang-corner" onClick={onToggleLang}>
-        {t.language}
-      </button>
+      <div className="lang-corner-pick">
+        {LANGS.map(([code, label]) => (
+          <button key={code} type="button" className={lang === code ? 'on' : ''} onClick={() => onLang(code)}>
+            {label}
+          </button>
+        ))}
+      </div>
       <div className="login-card">
         <div className="logo-mark large" aria-hidden="true">
           <LogoIcon />
         </div>
         <h1>TaskAI</h1>
-        <p className="muted">{t.tagline}</p>
+        {invite ? (
+          <div className="invite-card">
+            <strong dir="auto">
+              {invite.shared_by_name} {t.inviteTitle}
+            </strong>
+            <span dir="auto">“{invite.title}”</span>
+            <small className="muted-small">{t.inviteSignIn}</small>
+          </div>
+        ) : (
+          <p className="muted">{t.tagline}</p>
+        )}
         {sent ? (
           <p className="notice">{t.linkSent}</p>
         ) : (
