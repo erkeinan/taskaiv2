@@ -798,9 +798,16 @@ function AutoText({ className, value, onChange, onBlur, maxLength, label, placeh
   const ref = useRef(null);
   useLayoutEffect(() => {
     const el = ref.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${el.scrollHeight + 2}px`;
+    if (!el) return undefined;
+    const fit = () => {
+      el.style.height = 'auto';
+      el.style.height = `${el.scrollHeight + 2}px`;
+    };
+    fit();
+    // re-measure when the width changes (rotating the phone, resizing the window)
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => fit()) : null;
+    ro?.observe(el.parentElement || el);
+    return () => ro?.disconnect();
   }, [value]);
   return (
     <textarea
